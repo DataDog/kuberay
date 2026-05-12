@@ -73,6 +73,28 @@ func GetClusterDomainName() string {
 	return DefaultDomainName
 }
 
+// BuildDashboardURL constructs the dashboard URL for a given head service name and namespace.
+// If domainSuffix is non-empty, it constructs an HTTPS URL using the custom domain with the format:
+//
+//	https://<headSvcName>.<namespace>.<domainSuffix>[:<port>]
+//
+// domainSuffix should include any Kubernetes subdomain prefix, e.g.:
+//
+//	"svc.example.com"
+//	→ raycluster-head-svc.my-namespace.svc.example.com:8266
+//
+// If domainSuffix is empty it falls back to the plain HTTP URL built from fallbackURL
+// (backwards-compatible default behaviour).
+func BuildDashboardURL(headSvcName, namespace, domainSuffix, port, fallbackURL string) string {
+	if domainSuffix == "" {
+		return "http://" + fallbackURL
+	}
+	if port != "" {
+		return fmt.Sprintf("https://%s.%s.%s:%s", headSvcName, namespace, domainSuffix, port)
+	}
+	return fmt.Sprintf("https://%s.%s.%s", headSvcName, namespace, domainSuffix)
+}
+
 // IsCreated returns true if pod has been created and is maintained by the API server
 func IsCreated(pod *corev1.Pod) bool {
 	return pod.Status.Phase != ""
@@ -943,7 +965,7 @@ func FetchHeadServiceURL(ctx context.Context, cli client.Client, rayCluster *ray
 	return headServiceURL, nil
 }
 
-func GetRayDashboardClientFunc(mgr manager.Manager, useKubernetesProxy bool) func(rayCluster *rayv1.RayCluster, url string) (dashboardclient.RayDashboardClientInterface, error) {
+func GetRayDashboardClientFunc(mgr manager.Manager, useKubernetesProxy bool, dashboardDomainSuffix, dashboardPort string) func(rayCluster *rayv1.RayCluster, url string) (dashboardclient.RayDashboardClientInterface, error) {
 	return func(rayCluster *rayv1.RayCluster, url string) (dashboardclient.RayDashboardClientInterface, error) {
 		dashboardClient := &dashboardclient.RayDashboardClient{}
 		var authToken string
@@ -969,14 +991,9 @@ func GetRayDashboardClientFunc(mgr manager.Manager, useKubernetesProxy bool) fun
 		}
 
 		if useKubernetesProxy {
-			var err error
-			headSvcName := rayCluster.Status.Head.ServiceName
-			if headSvcName == "" {
-				headSvcName, err = GenerateHeadServiceName(RayClusterCRD, rayCluster.Spec, rayCluster.Name)
-				if err != nil {
-					err = fmt.Errorf("failed to construct Ray dashboard client: %w", err)
-					return nil, err
-				}
+			headSvcName, err := GenerateHeadServiceName(RayClusterCRD, rayCluster.Spec, rayCluster.Name)
+			if err != nil {
+				return nil, fmt.Errorf("failed to construct Ray dashboard client: %w", err)
 			}
 
 			dashboardClient.InitClient(
@@ -989,11 +1006,20 @@ func GetRayDashboardClientFunc(mgr manager.Manager, useKubernetesProxy bool) fun
 			return dashboardClient, nil
 		}
 
+		// Build the dashboard URL.
+		// Priority (highest to lowest):
+		//   1. Custom HTTPS domain  (dashboardDomainSuffix configured in operator)
+		//   2. Plain HTTP fallback  (original behaviour)
+		headSvcName, err := GenerateHeadServiceName(RayClusterCRD, rayCluster.Spec, rayCluster.Name)
+		if err != nil {
+			return nil, fmt.Errorf("failed to construct Ray dashboard client: %w", err)
+		}
+
 		dashboardClient.InitClient(
 			&http.Client{
 				Timeout: 2 * time.Second,
 			},
-			"http://"+url,
+			BuildDashboardURL(headSvcName, rayCluster.Namespace, dashboardDomainSuffix, dashboardPort, url),
 			authToken,
 		)
 

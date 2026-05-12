@@ -1792,3 +1792,86 @@ func TestGetWeightsFromHTTPRoute(t *testing.T) {
 		})
 	}
 }
+
+func TestBuildDashboardURL(t *testing.T) {
+	tests := []struct {
+		name         string
+		headSvcName  string
+		namespace    string
+		domainSuffix string
+		port         string
+		fallbackURL  string
+		want         string
+	}{
+		{
+			name:         "no domain suffix — uses HTTP fallback URL (backwards compatible)",
+			headSvcName:  "raycluster-head-svc",
+			namespace:    "my-namespace",
+			domainSuffix: "",
+			port:         "",
+			fallbackURL:  "10.0.0.1:8265",
+			want:         "http://10.0.0.1:8265",
+		},
+		{
+			name:         "no domain suffix — port is ignored",
+			headSvcName:  "raycluster-head-svc",
+			namespace:    "my-namespace",
+			domainSuffix: "",
+			port:         "8266",
+			fallbackURL:  "10.0.0.1:8265",
+			want:         "http://10.0.0.1:8265",
+		},
+		{
+			name:         "suffix includes svc. — constructs HTTPS URL with namespace and port",
+			headSvcName:  "raycluster-head-svc",
+			namespace:    "my-namespace",
+			domainSuffix: "svc.example.com",
+			port:         "8266",
+			fallbackURL:  "10.0.0.1:8265",
+			want:         "https://raycluster-head-svc.my-namespace.svc.example.com:8266",
+		},
+		{
+			name:         "suffix includes svc. — constructs HTTPS URL with namespace, no port",
+			headSvcName:  "raycluster-head-svc",
+			namespace:    "my-namespace",
+			domainSuffix: "svc.example.com",
+			port:         "",
+			fallbackURL:  "10.0.0.1:8265",
+			want:         "https://raycluster-head-svc.my-namespace.svc.example.com",
+		},
+		{
+			name:         "custom head service name with dashes in different namespace",
+			headSvcName:  "my-cluster-kuberay-head-svc",
+			namespace:    "ml-team",
+			domainSuffix: "svc.prod.example.com",
+			port:         "443",
+			fallbackURL:  "10.0.0.2:8265",
+			want:         "https://my-cluster-kuberay-head-svc.ml-team.svc.prod.example.com:443",
+		},
+		{
+			name:         "non-svc subdomain prefix",
+			headSvcName:  "my-ray-cluster-head-svc",
+			namespace:    "my-namespace",
+			domainSuffix: "mesh.example.com",
+			port:         "",
+			fallbackURL:  "10.0.0.1:8265",
+			want:         "https://my-ray-cluster-head-svc.my-namespace.mesh.example.com",
+		},
+		{
+			name:         "empty fallback URL when no domain suffix",
+			headSvcName:  "raycluster-head-svc",
+			namespace:    "default",
+			domainSuffix: "",
+			port:         "",
+			fallbackURL:  "",
+			want:         "http://",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := BuildDashboardURL(tt.headSvcName, tt.namespace, tt.domainSuffix, tt.port, tt.fallbackURL)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
