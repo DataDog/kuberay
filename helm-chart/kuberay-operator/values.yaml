@@ -149,6 +149,17 @@ operatorCommand: /manager
 # Using this option to configure kuberay-operator to comunitcate to Ray head pods by proxying through the Kubernetes API Server.
 # useKubernetesProxy: true
 
+# dashboard configures how the operator constructs the Ray dashboard URL.
+# When domainSuffix is set, the operator builds HTTPS URLs of the form:
+#   https://<head-svc-name>.<namespace>.<domainSuffix>[:<port>]
+# domainSuffix should include any Kubernetes subdomain prefix (e.g. "svc."):
+#   e.g. with the values below: raycluster-head-svc.my-namespace.svc.example.com:8266
+# This is useful when RayClusters are fronted by an envoy proxy with TLS already configured.
+# When unset (default), the operator uses the original HTTP behaviour (backwards compatible).
+# dashboard:
+#   domainSuffix: "svc.example.com"
+#   port: "8266"
+
 # -- If leaderElectionEnabled is set to true, the KubeRay operator will use leader election for high availability.
 leaderElectionEnabled: true
 
