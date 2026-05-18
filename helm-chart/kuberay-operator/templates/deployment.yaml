@@ -158,6 +158,17 @@ spec:
             {{- $argList = append $argList (printf "--burst=%v" .Values.kubeClient.burst) -}}
             {{- end -}}
             {{- end -}}
+            {{- if hasKey .Values "leaderElection" -}}
+            {{- if hasKey .Values.leaderElection "leaseDuration" -}}
+            {{- $argList = append $argList (printf "--leader-elect-lease-duration=%s" .Values.leaderElection.leaseDuration) -}}
+            {{- end -}}
+            {{- if hasKey .Values.leaderElection "renewDeadline" -}}
+            {{- $argList = append $argList (printf "--leader-elect-renew-deadline=%s" .Values.leaderElection.renewDeadline) -}}
+            {{- end -}}
+            {{- if hasKey .Values.leaderElection "retryPeriod" -}}
+            {{- $argList = append $argList (printf "--leader-elect-retry-period=%s" .Values.leaderElection.retryPeriod) -}}
+            {{- end -}}
+            {{- end -}}
             {{- (printf "\n") -}}
             {{- $argList | toYaml | indent 12 }}
           ports:
