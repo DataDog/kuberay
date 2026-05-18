@@ -74,6 +74,7 @@ func main() {
 	var burst int
 	var leaseDuration time.Duration
 	var renewDeadline time.Duration
+	var retryPeriod time.Duration
 
 	// TODO: remove flag-based config once Configuration API graduates to v1.
 	flag.StringVar(&metricsAddr, "metrics-addr", configapi.DefaultMetricsAddr, "The address the metric endpoint binds to.")
@@ -109,6 +110,7 @@ func main() {
 	flag.IntVar(&burst, "burst", configapi.DefaultBurst, "The maximum burst for throttling requests from this client to the Kubernetes API server.")
 	flag.DurationVar(&leaseDuration, "leader-elect-lease-duration", 60*time.Second, "Duration a non-leader candidate waits before attempting to acquire leadership.")
 	flag.DurationVar(&renewDeadline, "leader-elect-renew-deadline", 40*time.Second, "Duration the leader retries renewing the lease before giving up.")
+	flag.DurationVar(&retryPeriod, "leader-elect-retry-period", 2*time.Second, "Duration the LeaderElector clients should wait between tries of actions.")
 
 	opts := k8szap.Options{
 		TimeEncoder: zapcore.ISO8601TimeEncoder,
@@ -214,6 +216,7 @@ func main() {
 		LeaderElectionNamespace: config.LeaderElectionNamespace,
 		LeaseDuration:           &leaseDuration,
 		RenewDeadline:           &renewDeadline,
+		RetryPeriod:             &retryPeriod,
 	}
 
 	// Manager Cache
