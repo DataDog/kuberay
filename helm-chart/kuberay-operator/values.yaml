@@ -186,6 +186,17 @@ kubeClient:
   # Must be a non-negative integer.
   burst: 200
 
+# -- Leader election timing configuration.
+# Datadog override: raised above controller-runtime defaults (15s/10s/2s) to survive etcd defrag latency spikes.
+# to survive API server latency spikes (e.g., etcd defrag) without crashing.
+leaderElection:
+  # -- Duration a non-leader candidate waits before attempting to acquire leadership.
+  leaseDuration: 60s
+  # -- Duration the leader retries renewing the lease before giving up.
+  renewDeadline: 40s
+  # -- Duration LeaderElector clients wait between retries of actions.
+  retryPeriod: 2s
+
 # -- If rbacEnable is set to false, no RBAC resources will be created, including the Role for leader election, the Role for Pods and Services, and so on.
 rbacEnable: true
 

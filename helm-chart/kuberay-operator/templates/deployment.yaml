@@ -141,6 +141,17 @@ spec:
             {{- end -}}
             {{- end -}}
             {{- end -}}
+            {{- if hasKey .Values "leaderElection" -}}
+            {{- if hasKey .Values.leaderElection "leaseDuration" -}}
+            {{- $argList = append $argList (printf "--leader-elect-lease-duration=%s" .Values.leaderElection.leaseDuration) -}}
+            {{- end -}}
+            {{- if hasKey .Values.leaderElection "renewDeadline" -}}
+            {{- $argList = append $argList (printf "--leader-elect-renew-deadline=%s" .Values.leaderElection.renewDeadline) -}}
+            {{- end -}}
+            {{- if hasKey .Values.leaderElection "retryPeriod" -}}
+            {{- $argList = append $argList (printf "--leader-elect-retry-period=%s" .Values.leaderElection.retryPeriod) -}}
+            {{- end -}}
+            {{- end -}}
             {{- $argList = append $argList (include "kuberay.featureGates" . | trim) -}}
             {{- (printf "\n") -}}
             {{- $argList | toYaml | indent 12 }}

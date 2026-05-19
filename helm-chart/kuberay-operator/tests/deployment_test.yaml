@@ -403,3 +403,51 @@ tests:
       - contains:
           path: spec.template.spec.containers[?(@.name=="kuberay-operator")].args
           content: "--burst=200"
+
+  - it: Should add leader election flags when leaderElection is set
+    set:
+      leaderElection:
+        leaseDuration: 60s
+        renewDeadline: 40s
+        retryPeriod: 2s
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[?(@.name=="kuberay-operator")].args
+          content: "--leader-elect-lease-duration=60s"
+      - contains:
+          path: spec.template.spec.containers[?(@.name=="kuberay-operator")].args
+          content: "--leader-elect-renew-deadline=40s"
+      - contains:
+          path: spec.template.spec.containers[?(@.name=="kuberay-operator")].args
+          content: "--leader-elect-retry-period=2s"
+
+  - it: Should use custom leader election values when overridden
+    set:
+      leaderElection:
+        leaseDuration: 90s
+        renewDeadline: 60s
+        retryPeriod: 5s
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[?(@.name=="kuberay-operator")].args
+          content: "--leader-elect-lease-duration=90s"
+      - contains:
+          path: spec.template.spec.containers[?(@.name=="kuberay-operator")].args
+          content: "--leader-elect-renew-deadline=60s"
+      - contains:
+          path: spec.template.spec.containers[?(@.name=="kuberay-operator")].args
+          content: "--leader-elect-retry-period=5s"
+
+  - it: Should not add leader election flags when leaderElection is not set
+    set:
+      leaderElection: null
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[?(@.name=="kuberay-operator")].args
+          content: "--leader-elect-lease-duration=60s"
+      - notContains:
+          path: spec.template.spec.containers[?(@.name=="kuberay-operator")].args
+          content: "--leader-elect-renew-deadline=40s"
+      - notContains:
+          path: spec.template.spec.containers[?(@.name=="kuberay-operator")].args
+          content: "--leader-elect-retry-period=2s"
