@@ -187,7 +187,7 @@ kubeClient:
   burst: 200
 
 # -- Leader election timing configuration.
-# Raising these above the controller-runtime defaults (15s/10s/2s) gives the operator headroom
+# Datadog override: raised above controller-runtime defaults (15s/10s/2s) to survive etcd defrag latency spikes.
 # to survive API server latency spikes (e.g., etcd defrag) without crashing.
 leaderElection:
   # -- Duration a non-leader candidate waits before attempting to acquire leadership.

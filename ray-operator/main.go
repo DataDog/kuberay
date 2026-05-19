@@ -108,8 +108,8 @@ func main() {
 	flag.BoolVar(&enableMetrics, "enable-metrics", false, "Enable the emission of control plane metrics.")
 	flag.Float64Var(&qps, "qps", float64(configapi.DefaultQPS), "The QPS value for the client communicating with the Kubernetes API server.")
 	flag.IntVar(&burst, "burst", configapi.DefaultBurst, "The maximum burst for throttling requests from this client to the Kubernetes API server.")
-	flag.DurationVar(&leaseDuration, "leader-elect-lease-duration", 60*time.Second, "Duration a non-leader candidate waits before attempting to acquire leadership.")
-	flag.DurationVar(&renewDeadline, "leader-elect-renew-deadline", 40*time.Second, "Duration the leader retries renewing the lease before giving up.")
+	flag.DurationVar(&leaseDuration, "leader-elect-lease-duration", 15*time.Second, "Duration a non-leader candidate waits before attempting to acquire leadership.")
+	flag.DurationVar(&renewDeadline, "leader-elect-renew-deadline", 10*time.Second, "Duration the leader retries renewing the lease before giving up.")
 	flag.DurationVar(&retryPeriod, "leader-elect-retry-period", 2*time.Second, "Duration the LeaderElector clients should wait between tries of actions.")
 
 	opts := k8szap.Options{
