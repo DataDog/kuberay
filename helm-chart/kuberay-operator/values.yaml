@@ -37,10 +37,7 @@ priorityClassName: ""
 labels: {}
 
 # -- Extra annotations.
-# Emissary injection provisions mTLS client certificates at /etc/emissary/certs/client/
-# which are consumed by the operator via the KUBERAY_DASHBOARD_TLS_* env vars below.
-annotations:
-  emissary.datadoghq.com/inject-lifecycle: injected
+annotations: {}
 
 # -- Pod affinity
 affinity: {}
