@@ -66,8 +66,6 @@ func main() {
 	var logFileEncoder string
 	var logStdoutEncoder string
 	var useKubernetesProxy bool
-	var dashboardDomainSuffix string
-	var dashboardPort string
 	var configFile string
 	var featureGates string
 	var enableBatchScheduler bool
@@ -104,12 +102,6 @@ func main() {
 	flag.StringVar(&configFile, "config", "", "Path to structured config file. Flags are ignored if config file is set.")
 	flag.BoolVar(&useKubernetesProxy, "use-kubernetes-proxy", false,
 		"Use Kubernetes proxy subresource when connecting to the Ray Head node.")
-	flag.StringVar(&dashboardDomainSuffix, "dashboard-domain-suffix", "",
-		"Domain suffix for constructing HTTPS dashboard URLs. When set, the operator uses "+
-			"https://<head-svc>.<namespace>.<suffix>[:<port>] instead of the default HTTP URL. "+
-			"The suffix should include any Kubernetes subdomain prefix, e.g. svc.example.com.")
-	flag.StringVar(&dashboardPort, "dashboard-port", "",
-		"Port appended to the dashboard URL when --dashboard-domain-suffix is set.")
 	flag.StringVar(&featureGates, "feature-gates", "", "A set of key=value pairs that describe feature gates. E.g. FeatureOne=true,FeatureTwo=false,...")
 	flag.BoolVar(&enableMetrics, "enable-metrics", false, "Enable the emission of control plane metrics.")
 	flag.Float64Var(&qps, "qps", float64(configapi.DefaultQPS), "The QPS value for the client communicating with the Kubernetes API server.")
@@ -142,8 +134,6 @@ func main() {
 		config.EnableBatchScheduler = enableBatchScheduler
 		config.BatchScheduler = batchScheduler
 		config.UseKubernetesProxy = useKubernetesProxy
-		config.DashboardDomainSuffix = dashboardDomainSuffix
-		config.DashboardPort = dashboardPort
 		config.DeleteRayJobAfterJobFinishes = os.Getenv(utils.DELETE_RAYJOB_CR_AFTER_JOB_FINISHES) == "true"
 		config.EnableMetrics = enableMetrics
 		config.QPS = &qps

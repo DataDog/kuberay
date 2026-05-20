@@ -3,6 +3,8 @@ package utils
 import (
 	"context"
 	"crypto/sha1" //nolint:gosec // We are not using this for security purposes
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base32"
 	"fmt"
 	"math"
@@ -965,7 +967,52 @@ func FetchHeadServiceURL(ctx context.Context, cli client.Client, rayCluster *ray
 	return headServiceURL, nil
 }
 
-func GetRayDashboardClientFunc(mgr manager.Manager, useKubernetesProxy bool, dashboardDomainSuffix, dashboardPort string) func(rayCluster *rayv1.RayCluster, url string) (dashboardclient.RayDashboardClientInterface, error) {
+// newDashboardHTTPClient builds an *http.Client for dashboard connections.
+// When the KUBERAY_DASHBOARD_TLS_* environment variables are set it configures
+// TLS (one-way) or mTLS (when client cert+key are also provided); otherwise it
+// returns a plain client suitable for plain HTTP connections.
+func newDashboardHTTPClient() (*http.Client, error) {
+	caFile := os.Getenv(KUBERAY_DASHBOARD_TLS_CA_CERT)
+	certFile := os.Getenv(KUBERAY_DASHBOARD_TLS_CLIENT_CERT)
+	keyFile := os.Getenv(KUBERAY_DASHBOARD_TLS_CLIENT_KEY)
+
+	if caFile == "" && certFile == "" && keyFile == "" {
+		return &http.Client{Timeout: 2 * time.Second}, nil
+	}
+
+	if (certFile == "") != (keyFile == "") {
+		return nil, fmt.Errorf("%s and %s must both be set for mTLS", KUBERAY_DASHBOARD_TLS_CLIENT_CERT, KUBERAY_DASHBOARD_TLS_CLIENT_KEY)
+	}
+
+	tlsCfg := &tls.Config{}
+
+	if caFile != "" {
+		caPEM, err := os.ReadFile(caFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read dashboard CA cert %q: %w", caFile, err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(caPEM) {
+			return nil, fmt.Errorf("failed to parse dashboard CA cert %q", caFile)
+		}
+		tlsCfg.RootCAs = pool
+	}
+
+	if certFile != "" {
+		cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load dashboard client cert/key (%q, %q): %w", certFile, keyFile, err)
+		}
+		tlsCfg.Certificates = []tls.Certificate{cert}
+	}
+
+	return &http.Client{
+		Timeout:   2 * time.Second,
+		Transport: &http.Transport{TLSClientConfig: tlsCfg},
+	}, nil
+}
+
+func GetRayDashboardClientFunc(mgr manager.Manager, useKubernetesProxy bool) func(rayCluster *rayv1.RayCluster, url string) (dashboardclient.RayDashboardClientInterface, error) {
 	return func(rayCluster *rayv1.RayCluster, url string) (dashboardclient.RayDashboardClientInterface, error) {
 		dashboardClient := &dashboardclient.RayDashboardClient{}
 		var authToken string
@@ -1006,20 +1053,19 @@ func GetRayDashboardClientFunc(mgr manager.Manager, useKubernetesProxy bool, das
 			return dashboardClient, nil
 		}
 
-		// Build the dashboard URL.
-		// Priority (highest to lowest):
-		//   1. Custom HTTPS domain  (dashboardDomainSuffix configured in operator)
-		//   2. Plain HTTP fallback  (original behaviour)
 		headSvcName, err := GenerateHeadServiceName(RayClusterCRD, rayCluster.Spec, rayCluster.Name)
 		if err != nil {
 			return nil, fmt.Errorf("failed to construct Ray dashboard client: %w", err)
 		}
 
+		httpClient, err := newDashboardHTTPClient()
+		if err != nil {
+			return nil, fmt.Errorf("failed to construct Ray dashboard client: %w", err)
+		}
+
 		dashboardClient.InitClient(
-			&http.Client{
-				Timeout: 2 * time.Second,
-			},
-			BuildDashboardURL(headSvcName, rayCluster.Namespace, dashboardDomainSuffix, dashboardPort, url),
+			httpClient,
+			BuildDashboardURL(headSvcName, rayCluster.Namespace, os.Getenv(KUBERAY_DASHBOARD_DOMAIN_SUFFIX), os.Getenv(KUBERAY_DASHBOARD_PORT), url),
 			authToken,
 		)
 

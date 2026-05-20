@@ -2,9 +2,18 @@ package utils
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"errors"
+	"math/big"
+	"net/http"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1874,4 +1883,110 @@ func TestBuildDashboardURL(t *testing.T) {
 			assert.Equal(t, tt.want, got)
 		})
 	}
+}
+
+func TestNewDashboardHTTPClient(t *testing.T) {
+	// Generate a minimal self-signed CA cert for tests that need a real PEM file.
+	caCertPEM := generateSelfSignedCACert(t)
+	caFile := writeTempPEM(t, caCertPEM)
+
+	tests := []struct {
+		name    string
+		envVars map[string]string
+		wantTLS bool
+		wantErr string
+	}{
+		{
+			name:    "no env vars — returns plain HTTP client",
+			envVars: map[string]string{},
+			wantTLS: false,
+		},
+		{
+			name: "only CA cert — one-way TLS, custom RootCAs set",
+			envVars: map[string]string{
+				KUBERAY_DASHBOARD_TLS_CA_CERT: caFile,
+			},
+			wantTLS: true,
+		},
+		{
+			name: "CA cert file missing — error",
+			envVars: map[string]string{
+				KUBERAY_DASHBOARD_TLS_CA_CERT: "/nonexistent/ca.pem",
+			},
+			wantErr: "failed to read dashboard CA cert",
+		},
+		{
+			name: "cert without key — error",
+			envVars: map[string]string{
+				KUBERAY_DASHBOARD_TLS_CLIENT_CERT: caFile,
+			},
+			wantErr: KUBERAY_DASHBOARD_TLS_CLIENT_CERT,
+		},
+		{
+			name: "key without cert — error",
+			envVars: map[string]string{
+				KUBERAY_DASHBOARD_TLS_CLIENT_KEY: caFile,
+			},
+			wantErr: KUBERAY_DASHBOARD_TLS_CLIENT_CERT,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for k, v := range tt.envVars {
+				t.Setenv(k, v)
+			}
+
+			client, err := newDashboardHTTPClient()
+
+			if tt.wantErr != "" {
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+				assert.Nil(t, client)
+				return
+			}
+
+			require.NoError(t, err)
+			require.NotNil(t, client)
+
+			transport, hasTLSTransport := client.Transport.(*http.Transport)
+			if tt.wantTLS {
+				assert.True(t, hasTLSTransport, "expected TLS transport")
+				assert.NotNil(t, transport.TLSClientConfig)
+				assert.NotNil(t, transport.TLSClientConfig.RootCAs)
+			} else {
+				assert.False(t, hasTLSTransport, "expected plain client with no custom transport")
+			}
+		})
+	}
+}
+
+// generateSelfSignedCACert returns a PEM-encoded self-signed CA cert for testing.
+func generateSelfSignedCACert(t *testing.T) []byte {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "test-ca"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	require.NoError(t, err)
+
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+}
+
+func writeTempPEM(t *testing.T, data []byte) string {
+	t.Helper()
+	f, err := os.CreateTemp(t.TempDir(), "*.pem")
+	require.NoError(t, err)
+	_, err = f.Write(data)
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+	return f.Name()
 }

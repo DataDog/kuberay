@@ -86,21 +86,10 @@ type Configuration struct {
 
 	// EnableMetrics indicates whether KubeRay operator should emit control plane metrics.
 	EnableMetrics bool `json:"enableMetrics,omitempty"`
-
-	// DashboardDomainSuffix is the domain suffix appended to the head service name when
-	// constructing HTTPS dashboard URLs. When set, the operator builds URLs of the form:
-	//   https://<head-svc-name>.<namespace>.<DashboardDomainSuffix>[:<DashboardPort>]
-	// domainSuffix should include any Kubernetes subdomain prefix (e.g. "svc.").
-	// When empty (default), the operator uses the original HTTP behaviour.
-	DashboardDomainSuffix string `json:"dashboardDomainSuffix,omitempty"`
-
-	// DashboardPort is the port used when DashboardDomainSuffix is set.
-	// When empty, no port is appended to the dashboard URL.
-	DashboardPort string `json:"dashboardPort,omitempty"`
 }
 
 func (config Configuration) GetDashboardClient(mgr manager.Manager) func(rayCluster *rayv1.RayCluster, url string) (dashboardclient.RayDashboardClientInterface, error) {
-	return utils.GetRayDashboardClientFunc(mgr, config.UseKubernetesProxy, config.DashboardDomainSuffix, config.DashboardPort)
+	return utils.GetRayDashboardClientFunc(mgr, config.UseKubernetesProxy)
 }
 
 func (config Configuration) GetHttpProxyClient(mgr manager.Manager) func(hostIp, podNamespace, podName string, port int) utils.RayHttpProxyClientInterface {

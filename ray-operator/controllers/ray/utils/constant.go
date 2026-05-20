@@ -208,6 +208,27 @@ const (
 	// If set to true, we will use deterministic name for head pod. Otherwise, the non-deterministic name is used.
 	ENABLE_DETERMINISTIC_HEAD_POD_NAME = "ENABLE_DETERMINISTIC_HEAD_POD_NAME"
 
+	// Dashboard environment variables configure the Ray dashboard URL and TLS settings.
+	// Set these via the operator Deployment's env section (deployment.yaml / Helm values).
+	//
+	// KUBERAY_DASHBOARD_DOMAIN_SUFFIX – domain suffix appended when constructing HTTPS dashboard URLs.
+	//   When set, the operator builds: https://<head-svc>.<namespace>.<suffix>[:<port>]
+	//   The suffix must include any Kubernetes subdomain prefix, e.g. "svc.cluster.local".
+	//   When unset, the operator falls back to the original plain-HTTP behaviour.
+	// KUBERAY_DASHBOARD_PORT – port appended to the dashboard URL when KUBERAY_DASHBOARD_DOMAIN_SUFFIX is set.
+	//   When unset, no port is appended.
+	//
+	// TLS certificate paths (only relevant when KUBERAY_DASHBOARD_DOMAIN_SUFFIX is set):
+	// KUBERAY_DASHBOARD_TLS_CA_CERT     – path to the PEM CA cert used to verify the dashboard server cert.
+	// KUBERAY_DASHBOARD_TLS_CLIENT_CERT – path to the PEM client cert presented during mTLS handshake.
+	// KUBERAY_DASHBOARD_TLS_CLIENT_KEY  – path to the PEM private key for the client cert.
+	//   All three TLS vars must be set together for mTLS; only KUBERAY_DASHBOARD_TLS_CA_CERT is needed for one-way TLS.
+	KUBERAY_DASHBOARD_DOMAIN_SUFFIX    = "KUBERAY_DASHBOARD_DOMAIN_SUFFIX"
+	KUBERAY_DASHBOARD_PORT             = "KUBERAY_DASHBOARD_PORT"
+	KUBERAY_DASHBOARD_TLS_CA_CERT      = "KUBERAY_DASHBOARD_TLS_CA_CERT"
+	KUBERAY_DASHBOARD_TLS_CLIENT_CERT  = "KUBERAY_DASHBOARD_TLS_CLIENT_CERT"
+	KUBERAY_DASHBOARD_TLS_CLIENT_KEY   = "KUBERAY_DASHBOARD_TLS_CLIENT_KEY"
+
 	// Ray core default configurations
 	DefaultWorkerRayGcsReconnectTimeoutS = "600"
 

@@ -123,12 +123,6 @@ spec:
             {{- if hasKey .Values "useKubernetesProxy" -}}
             {{- $argList = append $argList (printf "--use-kubernetes-proxy=%t" .Values.useKubernetesProxy) -}}
             {{- end -}}
-            {{- if and (hasKey .Values "dashboard") (.Values.dashboard.domainSuffix) -}}
-            {{- $argList = append $argList (printf "--dashboard-domain-suffix=%s" .Values.dashboard.domainSuffix) -}}
-            {{- end -}}
-            {{- if and (hasKey .Values "dashboard") (.Values.dashboard.port) -}}
-            {{- $argList = append $argList (printf "--dashboard-port=%s" (.Values.dashboard.port | toString)) -}}
-            {{- end -}}
             {{- if hasKey .Values "leaderElectionEnabled" -}}
             {{- $argList = append $argList (printf "--enable-leader-election=%t" .Values.leaderElectionEnabled) -}}
             {{- end -}}

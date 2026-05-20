@@ -37,7 +37,10 @@ priorityClassName: ""
 labels: {}
 
 # -- Extra annotations.
-annotations: {}
+# Emissary injection provisions mTLS client certificates at /etc/emissary/certs/client/
+# which are consumed by the operator via the KUBERAY_DASHBOARD_TLS_* env vars below.
+annotations:
+  emissary.datadoghq.com/inject-lifecycle: injected
 
 # -- Pod affinity
 affinity: {}
@@ -149,16 +152,30 @@ operatorCommand: /manager
 # Using this option to configure kuberay-operator to comunitcate to Ray head pods by proxying through the Kubernetes API Server.
 # useKubernetesProxy: true
 
-# dashboard configures how the operator constructs the Ray dashboard URL.
-# When domainSuffix is set, the operator builds HTTPS URLs of the form:
-#   https://<head-svc-name>.<namespace>.<domainSuffix>[:<port>]
-# domainSuffix should include any Kubernetes subdomain prefix (e.g. "svc."):
-#   e.g. with the values below: raycluster-head-svc.my-namespace.svc.example.com:8266
-# This is useful when RayClusters are fronted by an envoy proxy with TLS already configured.
-# When unset (default), the operator uses the original HTTP behaviour (backwards compatible).
-# dashboard:
-#   domainSuffix: "svc.example.com"
-#   port: "8266"
+# Dashboard URL and TLS configuration via environment variables.
+# Set these under env: to configure HTTPS dashboard connections.
+#
+# KUBERAY_DASHBOARD_DOMAIN_SUFFIX  – domain suffix for HTTPS dashboard URLs.
+#   When set, the operator builds: https://<head-svc>.<namespace>.<suffix>[:<port>]
+#   The suffix must include any Kubernetes subdomain prefix (e.g. "svc.cluster.local").
+#   When unset (default), the operator uses the original plain-HTTP behaviour.
+# KUBERAY_DASHBOARD_PORT           – port appended to the URL when DOMAIN_SUFFIX is set.
+# KUBERAY_DASHBOARD_TLS_CA_CERT    – path to PEM CA cert for server cert verification.
+# KUBERAY_DASHBOARD_TLS_CLIENT_CERT – path to PEM client cert for mTLS (emissary: /etc/emissary/certs/client/cert.pem).
+# KUBERAY_DASHBOARD_TLS_CLIENT_KEY  – path to PEM client key  for mTLS (emissary: /etc/emissary/certs/client/key.pem).
+#
+# Example:
+# env:
+#   - name: KUBERAY_DASHBOARD_DOMAIN_SUFFIX
+#     value: "svc.$(CLUSTER_DOMAIN)"
+#   - name: KUBERAY_DASHBOARD_PORT
+#     value: "8266"
+#   - name: KUBERAY_DASHBOARD_TLS_CA_CERT
+#     value: /etc/emissary/certs/client/ca.pem
+#   - name: KUBERAY_DASHBOARD_TLS_CLIENT_CERT
+#     value: /etc/emissary/certs/client/cert.pem
+#   - name: KUBERAY_DASHBOARD_TLS_CLIENT_KEY
+#     value: /etc/emissary/certs/client/key.pem
 
 # -- If leaderElectionEnabled is set to true, the KubeRay operator will use leader election for high availability.
 leaderElectionEnabled: true
