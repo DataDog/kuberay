@@ -219,15 +219,18 @@ const (
 	//   When unset, no port is appended.
 	//
 	// TLS certificate paths (only relevant when KUBERAY_DASHBOARD_DOMAIN_SUFFIX is set):
-	// KUBERAY_DASHBOARD_TLS_CA_CERT     – path to the PEM CA cert used to verify the dashboard server cert.
-	// KUBERAY_DASHBOARD_TLS_CLIENT_CERT – path to the PEM client cert presented during mTLS handshake.
-	// KUBERAY_DASHBOARD_TLS_CLIENT_KEY  – path to the PEM private key for the client cert.
+	// KUBERAY_DASHBOARD_TLS_CA_CERT      – path to the PEM CA cert used to verify the dashboard server cert.
+	// KUBERAY_DASHBOARD_TLS_CLIENT_CERT  – path to the PEM client cert presented during mTLS handshake.
+	// KUBERAY_DASHBOARD_TLS_CLIENT_KEY   – path to the PEM private key for the client cert.
 	//   All three TLS vars must be set together for mTLS; only KUBERAY_DASHBOARD_TLS_CA_CERT is needed for one-way TLS.
+	// KUBERAY_DASHBOARD_TLS_SERVER_NAME  – overrides the server name used for TLS certificate verification.
+	//   Useful when the server presents a cert issued for a different name than the host in the dashboard URL.
 	KUBERAY_DASHBOARD_DOMAIN_SUFFIX    = "KUBERAY_DASHBOARD_DOMAIN_SUFFIX"
 	KUBERAY_DASHBOARD_PORT             = "KUBERAY_DASHBOARD_PORT"
 	KUBERAY_DASHBOARD_TLS_CA_CERT      = "KUBERAY_DASHBOARD_TLS_CA_CERT"
 	KUBERAY_DASHBOARD_TLS_CLIENT_CERT  = "KUBERAY_DASHBOARD_TLS_CLIENT_CERT"
 	KUBERAY_DASHBOARD_TLS_CLIENT_KEY   = "KUBERAY_DASHBOARD_TLS_CLIENT_KEY"
+	KUBERAY_DASHBOARD_TLS_SERVER_NAME  = "KUBERAY_DASHBOARD_TLS_SERVER_NAME"
 
 	// Ray core default configurations
 	DefaultWorkerRayGcsReconnectTimeoutS = "600"

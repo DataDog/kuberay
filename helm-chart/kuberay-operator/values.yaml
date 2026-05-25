@@ -157,9 +157,11 @@ operatorCommand: /manager
 #   The suffix must include any Kubernetes subdomain prefix (e.g. "svc.cluster.local").
 #   When unset (default), the operator uses the original plain-HTTP behaviour.
 # KUBERAY_DASHBOARD_PORT           – port appended to the URL when DOMAIN_SUFFIX is set.
-# KUBERAY_DASHBOARD_TLS_CA_CERT    – path to PEM CA cert for server cert verification.
-# KUBERAY_DASHBOARD_TLS_CLIENT_CERT – path to PEM client cert for mTLS (emissary: /etc/emissary/certs/client/cert.pem).
-# KUBERAY_DASHBOARD_TLS_CLIENT_KEY  – path to PEM client key  for mTLS (emissary: /etc/emissary/certs/client/key.pem).
+# KUBERAY_DASHBOARD_TLS_CA_CERT     – path to PEM CA cert for server cert verification.
+# KUBERAY_DASHBOARD_TLS_CLIENT_CERT – path to PEM client cert for mTLS.
+# KUBERAY_DASHBOARD_TLS_CLIENT_KEY  – path to PEM client key for mTLS.
+# KUBERAY_DASHBOARD_TLS_SERVER_NAME – override the server name used for TLS cert verification.
+#   Set when the server cert is issued for a different name than the host in the dashboard URL.
 #
 # Example:
 # env:
