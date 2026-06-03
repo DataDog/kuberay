@@ -200,17 +200,19 @@ func (r *RayServiceReconciler) Reconcile(ctx context.Context, request ctrl.Reque
 		if err = r.reconcilePerClusterServeService(ctx, rayServiceInstance, pendingRayClusterInstance); err != nil {
 			return ctrl.Result{RequeueAfter: ServiceDefaultRequeueDuration}, err
 		}
-		// Creates or updates a Gateway CR that points to the Serve services of
-		// the active and pending (if it exists) RayClusters. For incremental upgrades,
-		// the Gateway endpoint is used rather than the Serve service.
-		err = r.reconcileGateway(ctx, rayServiceInstance)
-		if err != nil {
-			return ctrl.Result{RequeueAfter: ServiceDefaultRequeueDuration}, client.IgnoreNotFound(err)
-		}
-		// Create or update the HTTPRoute for the Gateway, passing in the pending cluster readiness status.
-		httpRouteInstance, err = r.reconcileHTTPRoute(ctx, rayServiceInstance, isPendingClusterReady)
-		if err != nil {
-			return ctrl.Result{RequeueAfter: ServiceDefaultRequeueDuration}, client.IgnoreNotFound(err)
+		if !utils.IsSkipGateway(&rayServiceInstance.Spec) {
+			// Creates or updates a Gateway CR that points to the Serve services of
+			// the active and pending (if it exists) RayClusters. For incremental upgrades,
+			// the Gateway endpoint is used rather than the Serve service.
+			err = r.reconcileGateway(ctx, rayServiceInstance)
+			if err != nil {
+				return ctrl.Result{RequeueAfter: ServiceDefaultRequeueDuration}, client.IgnoreNotFound(err)
+			}
+			// Create or update the HTTPRoute for the Gateway, passing in the pending cluster readiness status.
+			httpRouteInstance, err = r.reconcileHTTPRoute(ctx, rayServiceInstance, isPendingClusterReady)
+			if err != nil {
+				return ctrl.Result{RequeueAfter: ServiceDefaultRequeueDuration}, client.IgnoreNotFound(err)
+			}
 		}
 	}
 
@@ -251,6 +253,7 @@ func (r *RayServiceReconciler) Reconcile(ctx context.Context, request ctrl.Reque
 		activeClusterServeApplications,
 		pendingClusterServeApplications,
 		httpRouteInstance,
+		isPendingClusterReady,
 	); err != nil {
 		return ctrl.Result{RequeueAfter: ServiceDefaultRequeueDuration}, err
 	}
@@ -341,6 +344,7 @@ func (r *RayServiceReconciler) calculateStatus(
 	activeCluster, pendingCluster *rayv1.RayCluster,
 	activeClusterServeApplications, pendingClusterServeApplications map[string]rayv1.AppStatus,
 	httpRoute *gwv1.HTTPRoute,
+	isPendingClusterReady bool,
 ) error {
 	logger := ctrl.LoggerFrom(ctx)
 
@@ -368,12 +372,29 @@ func (r *RayServiceReconciler) calculateStatus(
 			oldActivePercent := ptr.Deref(rayServiceInstance.Status.ActiveServiceStatus.TrafficRoutedPercent, -1)
 			oldPendingPercent := ptr.Deref(rayServiceInstance.Status.PendingServiceStatus.TrafficRoutedPercent, -1)
 
-			// Update TrafficRoutedPercent to each RayService based on current weights from HTTPRoute.
-			activeWeight, pendingWeight := utils.GetWeightsFromHTTPRoute(httpRoute, rayServiceInstance)
 			now := metav1.Time{Time: time.Now()}
+			var activeWeight, pendingWeight int32
+			if utils.IsSkipGateway(&rayServiceInstance.Spec) {
+				// No Gateway: advance TrafficRoutedPercent using the time-step calculation so
+				// the target_capacity advancement gate in reconcileServeTargetCapacity has a
+				// value to compare against. The client-side load balancer is responsible for
+				// reading targetCapacity from RayService status to split traffic accordingly.
+				logger.Info("SkipGateway is enabled: computing TrafficRoutedPercent via time-step instead of HTTPRoute weights.")
+				var err error
+				activeWeight, pendingWeight, err = r.calculateTrafficRoutedPercent(ctx, rayServiceInstance, isPendingClusterReady)
+				if err != nil {
+					logger.Info("Failed to calculate TrafficRoutedPercent for skipGateway mode.")
+				} else {
+					logger.Info("Calculated TrafficRoutedPercent via time-step (skipGateway)", "activeWeight", activeWeight, "pendingWeight", pendingWeight)
+				}
+			} else {
+				// Update TrafficRoutedPercent to each RayService based on current weights from HTTPRoute.
+				activeWeight, pendingWeight = utils.GetWeightsFromHTTPRoute(httpRoute, rayServiceInstance)
+				logger.Info("Calculated TrafficRoutedPercent from HTTPRoute", "activeWeight", activeWeight, "pendingWeight", pendingWeight)
+			}
 			if activeWeight >= 0 {
 				rayServiceInstance.Status.ActiveServiceStatus.TrafficRoutedPercent = ptr.To(activeWeight)
-				logger.Info("Updated active TrafficRoutedPercent from HTTPRoute", "activeClusterWeight", activeWeight)
+				logger.Info("Updated active TrafficRoutedPercent", "activeClusterWeight", activeWeight)
 				if activeWeight != oldActivePercent {
 					rayServiceInstance.Status.ActiveServiceStatus.LastTrafficMigratedTime = &now
 					logger.Info("Updated LastTrafficMigratedTime of Active Service.")
@@ -381,7 +402,7 @@ func (r *RayServiceReconciler) calculateStatus(
 			}
 			if pendingWeight >= 0 {
 				rayServiceInstance.Status.PendingServiceStatus.TrafficRoutedPercent = ptr.To(pendingWeight)
-				logger.Info("Updated pending TrafficRoutedPercent from HTTPRoute", "pendingClusterWeight", pendingWeight)
+				logger.Info("Updated pending TrafficRoutedPercent", "pendingClusterWeight", pendingWeight)
 				if pendingWeight != oldPendingPercent {
 					rayServiceInstance.Status.PendingServiceStatus.LastTrafficMigratedTime = &now
 					logger.Info("Updated LastTrafficMigratedTime of Pending Service.")
@@ -1286,6 +1307,7 @@ func (r *RayServiceReconciler) updateServeDeployment(ctx context.Context, raySer
 // The function ensures that traffic migration only proceeds when the target cluster has reached
 // its capacity limit, preventing resource conflicts and ensuring upgrade stability.
 func (r *RayServiceReconciler) checkIfNeedTargetCapacityUpdate(ctx context.Context, rayServiceInstance *rayv1.RayService) (bool, string) {
+	logger := ctrl.LoggerFrom(ctx)
 	activeRayServiceStatus := rayServiceInstance.Status.ActiveServiceStatus
 	pendingRayServiceStatus := rayServiceInstance.Status.PendingServiceStatus
 
@@ -1293,21 +1315,30 @@ func (r *RayServiceReconciler) checkIfNeedTargetCapacityUpdate(ctx context.Conte
 		return false, "Both active and pending RayCluster instances are required for NewClusterWithIncrementalUpgrade."
 	}
 
-	// Validate Gateway and HTTPRoute objects are ready
-	gatewayInstance := &gwv1.Gateway{}
-	if err := r.Get(ctx, common.RayServiceGatewayNamespacedName(rayServiceInstance), gatewayInstance); err != nil {
-		return false, fmt.Sprintf("Failed to retrieve Gateway for RayService: %v", err)
-	}
-	if !utils.IsGatewayReady(gatewayInstance) {
-		return false, "Gateway for RayService NewClusterWithIncrementalUpgrade is not ready."
-	}
+	if utils.IsSkipGateway(&rayServiceInstance.Spec) {
+		// Gateway and HTTPRoute reconciliation is disabled. Traffic splitting is managed by a
+		// client-side load balancer reading targetCapacity from RayService status. Skip the
+		// Gateway and HTTPRoute readiness checks and proceed directly to target_capacity logic.
+		logger.Info("SkipGateway is enabled: skipping Gateway and HTTPRoute readiness checks in checkIfNeedTargetCapacityUpdate.")
+	} else {
+		// Validate Gateway and HTTPRoute objects are ready
+		gatewayInstance := &gwv1.Gateway{}
+		if err := r.Get(ctx, common.RayServiceGatewayNamespacedName(rayServiceInstance), gatewayInstance); err != nil {
+			return false, fmt.Sprintf("Failed to retrieve Gateway for RayService: %v", err)
+		}
+		if !utils.IsGatewayReady(gatewayInstance) {
+			return false, "Gateway for RayService NewClusterWithIncrementalUpgrade is not ready."
+		}
+		logger.Info("Gateway for RayService NewClusterWithIncrementalUpgrade is ready.")
 
-	httpRouteInstance := &gwv1.HTTPRoute{}
-	if err := r.Get(ctx, common.RayServiceHTTPRouteNamespacedName(rayServiceInstance), httpRouteInstance); err != nil {
-		return false, fmt.Sprintf("Failed to retrieve HTTPRoute for RayService: %v", err)
-	}
-	if !utils.IsHTTPRouteReady(gatewayInstance, httpRouteInstance) {
-		return false, "HTTPRoute for RayService NewClusterWithIncrementalUpgrade is not ready."
+		httpRouteInstance := &gwv1.HTTPRoute{}
+		if err := r.Get(ctx, common.RayServiceHTTPRouteNamespacedName(rayServiceInstance), httpRouteInstance); err != nil {
+			return false, fmt.Sprintf("Failed to retrieve HTTPRoute for RayService: %v", err)
+		}
+		if !utils.IsHTTPRouteReady(gatewayInstance, httpRouteInstance) {
+			return false, "HTTPRoute for RayService NewClusterWithIncrementalUpgrade is not ready."
+		}
+		logger.Info("HTTPRoute for RayService NewClusterWithIncrementalUpgrade is ready.")
 	}
 
 	// Retrieve the current observed NewClusterWithIncrementalUpgrade Status fields for each RayService.

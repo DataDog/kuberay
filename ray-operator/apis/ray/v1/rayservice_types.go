@@ -71,7 +71,16 @@ type ClusterUpgradeOptions struct {
 	// The interval in seconds between transferring StepSize traffic from the old to new RayCluster.
 	IntervalSeconds *int32 `json:"intervalSeconds"`
 	// The name of the Gateway Class installed by the Kubernetes Cluster admin.
-	GatewayClassName string `json:"gatewayClassName"`
+	// Required when SkipGateway is false or unset.
+	// +optional
+	GatewayClassName string `json:"gatewayClassName,omitempty"`
+	// SkipGateway disables Gateway and HTTPRoute reconciliation and readiness checks during
+	// a NewClusterWithIncrementalUpgrade. When true, traffic splitting must be managed by a
+	// client-side load balancer that reads targetCapacity from the RayService status.
+	// TrafficRoutedPercent advances on a time-step basis using IntervalSeconds and StepSizePercent.
+	// GatewayClassName is not required when SkipGateway is true.
+	// +optional
+	SkipGateway *bool `json:"skipGateway,omitempty"`
 }
 
 type RayServiceUpgradeStrategy struct {

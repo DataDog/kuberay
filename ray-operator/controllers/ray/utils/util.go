@@ -820,6 +820,17 @@ func GetRayServiceClusterUpgradeOptions(spec *rayv1.RayServiceSpec) *rayv1.Clust
 	return nil
 }
 
+// IsSkipGateway returns true when the RayService is configured to skip Gateway and HTTPRoute
+// reconciliation during a NewClusterWithIncrementalUpgrade. When true, traffic splitting is
+// managed externally by a client-side load balancer reading targetCapacity from RayService status.
+func IsSkipGateway(spec *rayv1.RayServiceSpec) bool {
+	options := GetRayServiceClusterUpgradeOptions(spec)
+	if options == nil {
+		return false
+	}
+	return ptr.Deref(options.SkipGateway, false)
+}
+
 // IsIncrementalUpgradeComplete checks if the conditions for completing an incremental upgrade are met.
 func IsIncrementalUpgradeComplete(rayServiceInstance *rayv1.RayService, pendingCluster *rayv1.RayCluster) bool {
 	return pendingCluster != nil &&
