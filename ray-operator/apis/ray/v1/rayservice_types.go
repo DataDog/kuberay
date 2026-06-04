@@ -67,9 +67,13 @@ type ClusterUpgradeOptions struct {
 	// +kubebuilder:default:=100
 	MaxSurgePercent *int32 `json:"maxSurgePercent,omitempty"`
 	// The percentage of traffic to switch to the upgraded RayCluster at a set interval after scaling by MaxSurgePercent.
-	StepSizePercent *int32 `json:"stepSizePercent"`
+	// Not used when SkipGateway is true.
+	// +optional
+	StepSizePercent *int32 `json:"stepSizePercent,omitempty"`
 	// The interval in seconds between transferring StepSize traffic from the old to new RayCluster.
-	IntervalSeconds *int32 `json:"intervalSeconds"`
+	// Not used when SkipGateway is true.
+	// +optional
+	IntervalSeconds *int32 `json:"intervalSeconds,omitempty"`
 	// The name of the Gateway Class installed by the Kubernetes Cluster admin.
 	// Required when SkipGateway is false or unset.
 	// +optional
@@ -77,8 +81,9 @@ type ClusterUpgradeOptions struct {
 	// SkipGateway disables Gateway and HTTPRoute reconciliation and readiness checks during
 	// a NewClusterWithIncrementalUpgrade. When true, traffic splitting must be managed by a
 	// client-side load balancer that reads targetCapacity from the RayService status.
-	// TrafficRoutedPercent advances on a time-step basis using IntervalSeconds and StepSizePercent.
-	// GatewayClassName is not required when SkipGateway is true.
+	// target_capacity advances to the next step only after pending cluster Serve deployments
+	// report HEALTHY, ensuring each autoscaling round completes before the next begins.
+	// GatewayClassName, StepSizePercent, and IntervalSeconds are not required when SkipGateway is true.
 	// +optional
 	SkipGateway *bool `json:"skipGateway,omitempty"`
 }

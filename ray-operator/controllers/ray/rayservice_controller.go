@@ -375,17 +375,24 @@ func (r *RayServiceReconciler) calculateStatus(
 			now := metav1.Time{Time: time.Now()}
 			var activeWeight, pendingWeight int32
 			if utils.IsSkipGateway(&rayServiceInstance.Spec) {
-				// No Gateway: advance TrafficRoutedPercent using the time-step calculation so
-				// the target_capacity advancement gate in reconcileServeTargetCapacity has a
-				// value to compare against. The client-side load balancer is responsible for
-				// reading targetCapacity from RayService status to split traffic accordingly.
-				logger.Info("SkipGateway is enabled: computing TrafficRoutedPercent via time-step instead of HTTPRoute weights.")
-				var err error
-				activeWeight, pendingWeight, err = r.calculateTrafficRoutedPercent(ctx, rayServiceInstance, isPendingClusterReady)
-				if err != nil {
-					logger.Info("Failed to calculate TrafficRoutedPercent for skipGateway mode.")
+				// SkipGateway + endpoint gate: set TrafficRoutedPercent = TargetCapacity only
+				// when the pending cluster's Serve deployments are HEALTHY, meaning the
+				// autoscaling round has fully settled. The gate in reconcileServeTargetCapacity
+				// advances target_capacity only when TrafficRoutedPercent == TargetCapacity.
+				// The client-side LB reads targetCapacity from status directly for traffic routing
+				// and does not rely on TrafficRoutedPercent.
+				pendingTargetCap := ptr.Deref(rayServiceInstance.Status.PendingServiceStatus.TargetCapacity, 0)
+				if arePendingServeDeploymentsHealthy(pendingClusterServeApplications) {
+					pendingWeight = pendingTargetCap
+					activeWeight = 100 - pendingWeight
+					logger.Info("SkipGateway: pending Serve deployments HEALTHY, advancing TrafficRoutedPercent to match TargetCapacity.",
+						"pendingTargetCapacity", pendingTargetCap, "pendingWeight", pendingWeight, "activeWeight", activeWeight)
 				} else {
-					logger.Info("Calculated TrafficRoutedPercent via time-step (skipGateway)", "activeWeight", activeWeight, "pendingWeight", pendingWeight)
+					// Gate stays blocked: leave TrafficRoutedPercent at previous value by not updating.
+					activeWeight = -1
+					pendingWeight = -1
+					logger.Info("SkipGateway: pending Serve deployments not yet HEALTHY, holding TrafficRoutedPercent until autoscaling settles.",
+						"pendingTargetCapacity", pendingTargetCap)
 				}
 			} else {
 				// Update TrafficRoutedPercent to each RayService based on current weights from HTTPRoute.
@@ -1211,6 +1218,27 @@ func constructRayClusterForRayService(rayService *rayv1.RayService, rayClusterNa
 	}
 
 	return rayCluster, nil
+}
+
+// arePendingServeDeploymentsHealthy returns true when all Serve applications on the pending
+// cluster are RUNNING and all their deployments are HEALTHY. This is the signal that one
+// autoscaling round has completed at the current target_capacity, allowing the controller to
+// advance to the next step. Returns false when apps is empty (not yet initialised).
+func arePendingServeDeploymentsHealthy(apps map[string]rayv1.AppStatus) bool {
+	if len(apps) == 0 {
+		return false
+	}
+	for _, app := range apps {
+		if app.Status != rayv1.ApplicationStatusEnum.RUNNING {
+			return false
+		}
+		for _, deployment := range app.Deployments {
+			if deployment.Status != rayv1.DeploymentStatusEnum.HEALTHY {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func checkIfNeedSubmitServeApplications(cachedServeConfigV2 string, serveConfigV2 string, serveApplications map[string]rayv1.AppStatus) (bool, string) {
