@@ -8636,9 +8636,6 @@ spec:
                       stepSizePercent:
                         format: int32
                         type: integer
-                    required:
-                    - intervalSeconds
-                    - stepSizePercent
                     type: object
                   type:
                     type: string
