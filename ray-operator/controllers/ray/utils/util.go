@@ -1067,11 +1067,24 @@ func GetRayDashboardClientFunc(mgr manager.Manager, useKubernetesProxy bool) fun
 			return nil, fmt.Errorf("failed to construct Ray dashboard client: %w", err)
 		}
 
-		dashboardClient.InitClient(
-			httpClient,
-			BuildDashboardURL(headSvcName, rayCluster.Namespace, os.Getenv(KUBERAY_DASHBOARD_DOMAIN_SUFFIX), os.Getenv(KUBERAY_DASHBOARD_PORT), url),
-			authToken,
-		)
+		domainSuffix := os.Getenv(KUBERAY_DASHBOARD_DOMAIN_SUFFIX)
+		port := os.Getenv(KUBERAY_DASHBOARD_PORT)
+		var dashURL string
+		if domainSuffix != "" && rayCluster.Status.Head.PodIP != "" {
+			// Connect via pod IP so Go's TLS verifier uses the cert's IP SAN
+			// rather than the hostname. This avoids mismatches when the server
+			// cert is issued for a shared service name (e.g. via a sidecar
+			// proxy) rather than the per-cluster head service name.
+			if port != "" {
+				dashURL = fmt.Sprintf("https://%s:%s", rayCluster.Status.Head.PodIP, port)
+			} else {
+				dashURL = fmt.Sprintf("https://%s", rayCluster.Status.Head.PodIP)
+			}
+		} else {
+			dashURL = BuildDashboardURL(headSvcName, rayCluster.Namespace, domainSuffix, port, url)
+		}
+
+		dashboardClient.InitClient(httpClient, dashURL, authToken)
 
 		return dashboardClient, nil
 	}
