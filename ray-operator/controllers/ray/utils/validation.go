@@ -403,16 +403,20 @@ func ValidateClusterUpgradeOptions(rayService *rayv1.RayService) error {
 		return fmt.Errorf("maxSurgePercent must be between 0 and 100")
 	}
 
-	if options.StepSizePercent == nil || *options.StepSizePercent < 0 || *options.StepSizePercent > 100 {
-		return fmt.Errorf("stepSizePercent must be between 0 and 100")
-	}
+	skipGateway := options.SkipGateway != nil && *options.SkipGateway
 
-	if options.IntervalSeconds == nil || *options.IntervalSeconds <= 0 {
-		return fmt.Errorf("intervalSeconds must be greater than 0")
-	}
+	if !skipGateway {
+		if options.StepSizePercent == nil || *options.StepSizePercent < 0 || *options.StepSizePercent > 100 {
+			return fmt.Errorf("stepSizePercent must be between 0 and 100")
+		}
 
-	if options.GatewayClassName == "" {
-		return fmt.Errorf("gatewayClassName is required for NewClusterWithIncrementalUpgrade")
+		if options.IntervalSeconds == nil || *options.IntervalSeconds <= 0 {
+			return fmt.Errorf("intervalSeconds must be greater than 0")
+		}
+
+		if options.GatewayClassName == "" {
+			return fmt.Errorf("gatewayClassName is required for NewClusterWithIncrementalUpgrade")
+		}
 	}
 
 	return nil
