@@ -86,6 +86,12 @@ type ClusterUpgradeOptions struct {
 	// GatewayClassName, StepSizePercent, and IntervalSeconds are not required when SkipGateway is true.
 	// +optional
 	SkipGateway *bool `json:"skipGateway,omitempty"`
+	// UpgradeTimeoutSeconds is the maximum duration in seconds the upgrade is allowed to
+	// remain in progress. If the pending cluster does not complete the upgrade within this
+	// window, the upgrade is aborted: the pending RayCluster is deleted and a Kubernetes
+	// event is emitted. Defaults to 0 (no timeout).
+	// +optional
+	UpgradeTimeoutSeconds *int32 `json:"upgradeTimeoutSeconds,omitempty"`
 }
 
 type RayServiceUpgradeStrategy struct {

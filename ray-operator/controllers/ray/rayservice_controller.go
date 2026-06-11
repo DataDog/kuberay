@@ -151,6 +151,13 @@ func (r *RayServiceReconciler) Reconcile(ctx context.Context, request ctrl.Reque
 		return ctrl.Result{RequeueAfter: ServiceDefaultRequeueDuration}, client.IgnoreNotFound(err)
 	}
 
+	// Check if the upgrade has exceeded UpgradeTimeoutSeconds; abort if so.
+	if aborted, err := r.abortUpgradeIfTimedOut(ctx, rayServiceInstance, pendingRayClusterInstance); err != nil {
+		return ctrl.Result{RequeueAfter: ServiceDefaultRequeueDuration}, err
+	} else if aborted {
+		return ctrl.Result{RequeueAfter: ServiceDefaultRequeueDuration}, nil
+	}
+
 	// Check both active and pending Ray clusters to see if the head Pod is ready to serve requests.
 	// This is important to ensure the reliability of the serve service because the head Pod cannot
 	// rely on readiness probes to determine serve readiness.
@@ -382,16 +389,16 @@ func (r *RayServiceReconciler) calculateStatus(
 				// The client-side LB reads targetCapacity from status directly for traffic routing
 				// and does not rely on TrafficRoutedPercent.
 				pendingTargetCap := ptr.Deref(rayServiceInstance.Status.PendingServiceStatus.TargetCapacity, 0)
-				if arePendingServeDeploymentsHealthy(pendingClusterServeApplications) {
+				if isPendingClusterCapacityReady(pendingClusterServeApplications, activeCluster, pendingCluster, pendingTargetCap) {
 					pendingWeight = pendingTargetCap
 					activeWeight = 100 - pendingWeight
-					logger.Info("SkipGateway: pending Serve deployments HEALTHY, advancing TrafficRoutedPercent to match TargetCapacity.",
+					logger.Info("SkipGateway: pending cluster capacity ready, advancing TrafficRoutedPercent to match TargetCapacity.",
 						"pendingTargetCapacity", pendingTargetCap, "pendingWeight", pendingWeight, "activeWeight", activeWeight)
 				} else {
 					// Gate stays blocked: leave TrafficRoutedPercent at previous value by not updating.
 					activeWeight = -1
 					pendingWeight = -1
-					logger.Info("SkipGateway: pending Serve deployments not yet HEALTHY, holding TrafficRoutedPercent until autoscaling settles.",
+					logger.Info("SkipGateway: pending cluster not yet capacity-ready, holding TrafficRoutedPercent until deployments are healthy and replicas are sufficient.",
 						"pendingTargetCapacity", pendingTargetCap)
 				}
 			} else {
@@ -1239,6 +1246,96 @@ func arePendingServeDeploymentsHealthy(apps map[string]rayv1.AppStatus) bool {
 		}
 	}
 	return true
+}
+
+// isPendingClusterCapacityReady returns true when it is safe to advance TrafficRoutedPercent
+// to pendingTargetCap for a skipGateway upgrade. It combines two gates:
+//
+//  1. Serve health: all pending cluster deployments must be HEALTHY (same as the base health gate).
+//  2. Capacity parity: the pending cluster must have enough available worker replicas to handle
+//     the traffic level it is about to receive.
+//
+// Parity check formula: pending.availableWorkers >= ceil(pendingTargetCap/100 * active.availableWorkers)
+//
+// The parity check is skipped (falls back to health-only) when:
+//   - Either cluster object is nil (no information to compare).
+//   - pending.maxReplicas < active.availableWorkers: the upgrade intentionally reduces capacity
+//     (e.g. cost reduction). Requiring parity would deadlock the upgrade since the pending
+//     cluster can never reach the active cluster's current replica count.
+//
+// TODO: Consider snapshotting the active cluster's replica count at upgrade start rather than
+// using the live count. Without a snapshot, a spike that scales the active cluster mid-upgrade
+// raises the parity bar and may stall the upgrade until load subsides.
+func isPendingClusterCapacityReady(
+	apps map[string]rayv1.AppStatus,
+	activeCluster, pendingCluster *rayv1.RayCluster,
+	pendingTargetCap int32,
+) bool {
+	if !arePendingServeDeploymentsHealthy(apps) {
+		return false
+	}
+
+	if activeCluster == nil || pendingCluster == nil {
+		return true
+	}
+
+	activeAvailable := activeCluster.Status.AvailableWorkerReplicas
+	pendingAvailable := pendingCluster.Status.AvailableWorkerReplicas
+
+	// Sum maxReplicas across all worker groups on the pending cluster.
+	var pendingMaxReplicas int32
+	for _, wg := range pendingCluster.Spec.WorkerGroupSpecs {
+		if wg.MaxReplicas != nil {
+			pendingMaxReplicas += *wg.MaxReplicas
+		}
+	}
+
+	// Intentional capacity reduction: skip parity to avoid deadlock.
+	if pendingMaxReplicas < activeAvailable {
+		return true
+	}
+
+	// ceil(pendingTargetCap/100 * activeAvailable) using integer arithmetic.
+	requiredReplicas := (pendingTargetCap*activeAvailable + 99) / 100
+	return pendingAvailable >= requiredReplicas
+}
+
+// abortUpgradeIfTimedOut checks whether the pending cluster has exceeded UpgradeTimeoutSeconds.
+// If so, it deletes the pending RayCluster and emits a Warning event. Returns (true, nil) when the
+// upgrade was aborted, (false, nil) when no timeout has occurred, and (false, err) on delete failure.
+func (r *RayServiceReconciler) abortUpgradeIfTimedOut(ctx context.Context, rayServiceInstance *rayv1.RayService, pendingCluster *rayv1.RayCluster) (bool, error) {
+	if pendingCluster == nil {
+		return false, nil
+	}
+	if !utils.IsIncrementalUpgradeEnabled(&rayServiceInstance.Spec) {
+		return false, nil
+	}
+	options := utils.GetRayServiceClusterUpgradeOptions(&rayServiceInstance.Spec)
+	if options == nil || options.UpgradeTimeoutSeconds == nil || *options.UpgradeTimeoutSeconds <= 0 {
+		return false, nil
+	}
+
+	elapsed := time.Since(pendingCluster.CreationTimestamp.Time)
+	timeout := time.Duration(*options.UpgradeTimeoutSeconds) * time.Second
+	if elapsed <= timeout {
+		return false, nil
+	}
+
+	logger := ctrl.LoggerFrom(ctx)
+	logger.Info("Upgrade timed out, aborting by deleting pending RayCluster.",
+		"pendingCluster", pendingCluster.Name,
+		"elapsed", elapsed.String(),
+		"timeout", timeout.String())
+
+	if err := r.Delete(ctx, pendingCluster, client.PropagationPolicy(metav1.DeletePropagationBackground)); err != nil {
+		r.Recorder.Eventf(rayServiceInstance, corev1.EventTypeWarning, string(utils.FailedToDeleteRayCluster),
+			"Upgrade timed out but failed to delete pending RayCluster %s/%s: %v", pendingCluster.Namespace, pendingCluster.Name, err)
+		return false, err
+	}
+	r.Recorder.Eventf(rayServiceInstance, corev1.EventTypeWarning, string(utils.UpgradeTimeout),
+		"Upgrade exceeded timeout of %ds; deleted pending RayCluster %s/%s after %s elapsed",
+		*options.UpgradeTimeoutSeconds, pendingCluster.Namespace, pendingCluster.Name, elapsed.Round(time.Second).String())
+	return true, nil
 }
 
 func checkIfNeedSubmitServeApplications(cachedServeConfigV2 string, serveConfigV2 string, serveApplications map[string]rayv1.AppStatus) (bool, string) {
