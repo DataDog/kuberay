@@ -491,6 +491,10 @@ func ValidateClusterUpgradeOptions(rayService *rayv1.RayService) error {
 		}
 	}
 
+	if options.UpgradeTimeoutSeconds != nil && *options.UpgradeTimeoutSeconds < 0 {
+		return fmt.Errorf("upgradeTimeoutSeconds must be greater than or equal to 0")
+	}
+
 	return nil
 }
 
