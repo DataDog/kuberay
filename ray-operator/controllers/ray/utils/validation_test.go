@@ -1963,6 +1963,7 @@ func TestValidateClusterUpgradeOptions(t *testing.T) {
 		gatewayClassName  string
 		spec              rayv1.RayServiceSpec
 		enableAutoscaling bool
+		skipGateway       bool
 		expectError       bool
 	}{
 		{
@@ -2031,12 +2032,33 @@ func TestValidateClusterUpgradeOptions(t *testing.T) {
 			enableAutoscaling: true,
 			expectError:       true,
 		},
+		{
+			name:              "skipGateway valid without autoscaler",
+			maxSurgePercent:   ptr.To(int32(20)),
+			skipGateway:       true,
+			enableAutoscaling: false,
+			expectError:       false,
+		},
+		{
+			name:              "skipGateway valid with autoscaler",
+			maxSurgePercent:   ptr.To(int32(20)),
+			skipGateway:       true,
+			enableAutoscaling: true,
+			expectError:       false,
+		},
+		{
+			name:              "skipGateway does not require stepSizePercent or intervalSeconds",
+			maxSurgePercent:   ptr.To(int32(50)),
+			skipGateway:       true,
+			enableAutoscaling: false,
+			expectError:       false,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var upgradeStrategy *rayv1.RayServiceUpgradeStrategy
-			if tt.maxSurgePercent != nil || tt.stepSizePercent != nil || tt.intervalSeconds != nil || tt.gatewayClassName != "" {
+			if tt.maxSurgePercent != nil || tt.stepSizePercent != nil || tt.intervalSeconds != nil || tt.gatewayClassName != "" || tt.skipGateway {
 				upgradeStrategy = &rayv1.RayServiceUpgradeStrategy{
 					Type: ptr.To(rayv1.RayServiceNewClusterWithIncrementalUpgrade),
 					ClusterUpgradeOptions: &rayv1.ClusterUpgradeOptions{
@@ -2044,6 +2066,7 @@ func TestValidateClusterUpgradeOptions(t *testing.T) {
 						StepSizePercent:  tt.stepSizePercent,
 						IntervalSeconds:  tt.intervalSeconds,
 						GatewayClassName: tt.gatewayClassName,
+						SkipGateway:      ptr.To(tt.skipGateway),
 					},
 				}
 			} else if tt.expectError {
