@@ -389,23 +389,21 @@ func ValidateRayServiceSpec(rayService *rayv1.RayService) error {
 }
 
 func ValidateClusterUpgradeOptions(rayService *rayv1.RayService) error {
+	if !IsAutoscalingEnabled(&rayService.Spec.RayClusterSpec) {
+		return fmt.Errorf("Ray Autoscaler is required for NewClusterWithIncrementalUpgrade")
+	}
+
 	options := rayService.Spec.UpgradeStrategy.ClusterUpgradeOptions
 	if options == nil {
 		return fmt.Errorf("ClusterUpgradeOptions are required for NewClusterWithIncrementalUpgrade")
-	}
-
-	skipGateway := options.SkipGateway != nil && *options.SkipGateway
-
-	// Autoscaler is required for gateway-based incremental upgrade but not for skipGateway mode,
-	// which uses client-side load balancing driven by targetCapacity in RayService status.
-	if !skipGateway && !IsAutoscalingEnabled(&rayService.Spec.RayClusterSpec) {
-		return fmt.Errorf("Ray Autoscaler is required for NewClusterWithIncrementalUpgrade")
 	}
 
 	// MaxSurgePercent defaults to 100% if unset.
 	if *options.MaxSurgePercent < 0 || *options.MaxSurgePercent > 100 {
 		return fmt.Errorf("maxSurgePercent must be between 0 and 100")
 	}
+
+	skipGateway := options.SkipGateway != nil && *options.SkipGateway
 
 	if !skipGateway {
 		if options.StepSizePercent == nil || *options.StepSizePercent < 0 || *options.StepSizePercent > 100 {

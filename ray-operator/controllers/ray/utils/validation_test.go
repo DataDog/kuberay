@@ -1844,13 +1844,6 @@ func TestValidateClusterUpgradeOptions(t *testing.T) {
 			expectError:       true,
 		},
 		{
-			name:              "skipGateway valid without autoscaler",
-			maxSurgePercent:   ptr.To(int32(20)),
-			skipGateway:       true,
-			enableAutoscaling: false,
-			expectError:       false,
-		},
-		{
 			name:              "skipGateway valid with autoscaler",
 			maxSurgePercent:   ptr.To(int32(20)),
 			skipGateway:       true,
@@ -1858,10 +1851,17 @@ func TestValidateClusterUpgradeOptions(t *testing.T) {
 			expectError:       false,
 		},
 		{
-			name:              "skipGateway does not require stepSizePercent or intervalSeconds",
-			maxSurgePercent:   ptr.To(int32(50)),
+			name:              "skipGateway still requires autoscaler for targetCapacity to scale workers",
+			maxSurgePercent:   ptr.To(int32(20)),
 			skipGateway:       true,
 			enableAutoscaling: false,
+			expectError:       true,
+		},
+		{
+			name:              "skipGateway does not require stepSizePercent, intervalSeconds, or gatewayClassName",
+			maxSurgePercent:   ptr.To(int32(50)),
+			skipGateway:       true,
+			enableAutoscaling: true,
 			expectError:       false,
 		},
 	}
