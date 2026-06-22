@@ -380,27 +380,28 @@ func (r *RayServiceReconciler) calculateStatus(
 			oldPendingPercent := ptr.Deref(rayServiceInstance.Status.PendingServiceStatus.TrafficRoutedPercent, -1)
 
 			now := metav1.Time{Time: time.Now()}
-			var activeWeight, pendingWeight int32
+			// Default sentinel: -1 means "don't update TrafficRoutedPercent this reconcile".
+			activeWeight, pendingWeight := int32(-1), int32(-1)
 			if utils.IsSkipGateway(&rayServiceInstance.Spec) {
-				// SkipGateway + endpoint gate: set TrafficRoutedPercent = TargetCapacity only
-				// when the pending cluster's Serve deployments are HEALTHY, meaning the
-				// autoscaling round has fully settled. The gate in reconcileServeTargetCapacity
-				// advances target_capacity only when TrafficRoutedPercent == TargetCapacity.
-				// The client-side LB reads targetCapacity from status directly for traffic routing
-				// and does not rely on TrafficRoutedPercent.
-				pendingTargetCap := ptr.Deref(rayServiceInstance.Status.PendingServiceStatus.TargetCapacity, 0)
-				if isPendingClusterCapacityReady(pendingClusterServeApplications, activeCluster, pendingCluster, pendingTargetCap) {
-					pendingWeight = pendingTargetCap
-					activeWeight = 100 - pendingWeight
-					logger.Info("SkipGateway: pending cluster capacity ready, advancing TrafficRoutedPercent to match TargetCapacity.",
-						"pendingTargetCapacity", pendingTargetCap, "pendingWeight", pendingWeight, "activeWeight", activeWeight)
-				} else {
-					// Gate stays blocked: leave TrafficRoutedPercent at previous value by not updating.
-					activeWeight = -1
-					pendingWeight = -1
-					logger.Info("SkipGateway: pending cluster not yet capacity-ready, holding TrafficRoutedPercent until deployments are healthy and replicas are sufficient.",
-						"pendingTargetCapacity", pendingTargetCap)
+				if pendingCluster != nil {
+					// SkipGateway + endpoint gate: set TrafficRoutedPercent = TargetCapacity only
+					// when the pending cluster's Serve deployments are HEALTHY, meaning the
+					// autoscaling round has fully settled. The gate in reconcileServeTargetCapacity
+					// advances target_capacity only when TrafficRoutedPercent == TargetCapacity.
+					// The client-side LB reads targetCapacity from status directly for traffic routing
+					// and does not rely on TrafficRoutedPercent.
+					pendingTargetCap := ptr.Deref(rayServiceInstance.Status.PendingServiceStatus.TargetCapacity, 0)
+					if isPendingClusterCapacityReady(pendingClusterServeApplications, activeCluster, pendingCluster, pendingTargetCap) {
+						pendingWeight = pendingTargetCap
+						activeWeight = 100 - pendingWeight
+						logger.Info("SkipGateway: pending cluster capacity ready, advancing TrafficRoutedPercent to match TargetCapacity.",
+							"pendingTargetCapacity", pendingTargetCap, "pendingWeight", pendingWeight, "activeWeight", activeWeight)
+					} else {
+						logger.Info("SkipGateway: pending cluster not yet capacity-ready, holding TrafficRoutedPercent until deployments are healthy and replicas are sufficient.",
+							"pendingTargetCapacity", pendingTargetCap)
+					}
 				}
+				// No pending cluster: no upgrade in progress, leave TrafficRoutedPercent unchanged.
 			} else {
 				// Update TrafficRoutedPercent to each RayService based on current weights from HTTPRoute.
 				activeWeight, pendingWeight = utils.GetWeightsFromHTTPRoute(httpRoute, rayServiceInstance)

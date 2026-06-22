@@ -2638,3 +2638,63 @@ func TestShouldUpdateCluster_SuspendFlip(t *testing.T) {
 		})
 	}
 }
+
+func makeClusterWithWorkers(available int32, maxReplicas int32) *rayv1.RayCluster {
+	return &rayv1.RayCluster{
+		Spec: rayv1.RayClusterSpec{
+			WorkerGroupSpecs: []rayv1.WorkerGroupSpec{
+				{MaxReplicas: ptr.To(maxReplicas)},
+			},
+		},
+		Status: rayv1.RayClusterStatus{
+			AvailableWorkerReplicas: available,
+		},
+	}
+}
+
+func makeHealthyApps() map[string]rayv1.AppStatus {
+	return map[string]rayv1.AppStatus{
+		"app": {
+			Status: rayv1.ApplicationStatusEnum.RUNNING,
+			Deployments: map[string]rayv1.ServeDeploymentStatus{
+				"dep": {Status: rayv1.DeploymentStatusEnum.HEALTHY},
+			},
+		},
+	}
+}
+
+func TestIsPendingClusterCapacityReady(t *testing.T) {
+	t.Run("returns false when no pending apps", func(t *testing.T) {
+		active := makeClusterWithWorkers(2, 2)
+		pending := makeClusterWithWorkers(1, 2)
+		assert.False(t, isPendingClusterCapacityReady(nil, active, pending, 20))
+	})
+
+	t.Run("returns true when both clusters nil", func(t *testing.T) {
+		assert.True(t, isPendingClusterCapacityReady(makeHealthyApps(), nil, nil, 0))
+	})
+
+	t.Run("returns true when pending maxReplicas < active available (capacity reduction)", func(t *testing.T) {
+		active := makeClusterWithWorkers(3, 3)
+		pending := makeClusterWithWorkers(1, 2) // maxReplicas=2 < activeAvailable=3
+		assert.True(t, isPendingClusterCapacityReady(makeHealthyApps(), active, pending, 80))
+	})
+
+	t.Run("returns false when pending workers insufficient for TC", func(t *testing.T) {
+		active := makeClusterWithWorkers(3, 5)
+		pending := makeClusterWithWorkers(1, 5) // needs ceil(40%*3)=2 workers, has 1
+		assert.False(t, isPendingClusterCapacityReady(makeHealthyApps(), active, pending, 40))
+	})
+
+	t.Run("returns true when pending workers sufficient for TC", func(t *testing.T) {
+		active := makeClusterWithWorkers(3, 5)
+		pending := makeClusterWithWorkers(2, 5) // needs ceil(40%*3)=2 workers, has 2
+		assert.True(t, isPendingClusterCapacityReady(makeHealthyApps(), active, pending, 40))
+	})
+
+	t.Run("TC=0 always passes worker check (no workers needed)", func(t *testing.T) {
+		active := makeClusterWithWorkers(3, 5)
+		pending := makeClusterWithWorkers(0, 5) // ceil(0%*3)=0 workers needed
+		assert.True(t, isPendingClusterCapacityReady(makeHealthyApps(), active, pending, 0))
+	})
+}
