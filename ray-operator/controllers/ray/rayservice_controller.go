@@ -207,6 +207,17 @@ func (r *RayServiceReconciler) Reconcile(ctx context.Context, request ctrl.Reque
 		if err = r.reconcilePerClusterServeService(ctx, rayServiceInstance, pendingRayClusterInstance); err != nil {
 			return ctrl.Result{RequeueAfter: ServiceDefaultRequeueDuration}, err
 		}
+		// Keep the stable <rayservice-name>-serve-svc in sync with the active cluster.
+		// reconcileServicesToReadyCluster uses the RayCluster name as the service name under
+		// incremental upgrade, so it only creates/updates per-cluster services. Any stable
+		// service that exists (either created before incremental upgrade was enabled, or
+		// from a spec.serveService field) is never touched by that path and becomes stale
+		// after the first cluster promotion. This applies to both gateway and skipGateway paths.
+		if activeRayClusterInstance != nil {
+			if err = r.reconcileStableServeService(ctx, rayServiceInstance, activeRayClusterInstance); err != nil {
+				return ctrl.Result{RequeueAfter: ServiceDefaultRequeueDuration}, err
+			}
+		}
 		if !utils.IsSkipGateway(&rayServiceInstance.Spec) {
 			// Creates or updates a Gateway CR that points to the Serve services of
 			// the active and pending (if it exists) RayClusters. For incremental upgrades,
@@ -1979,6 +1990,98 @@ func markFailedOnInitializingTimeout(ctx context.Context, r *RayServiceReconcile
 	r.Recorder.Eventf(rs, corev1.EventTypeWarning, string(utils.RayServiceInitializingTimeout),
 		"RayService initializing timeout exceeded after %s (configured timeout: %s)",
 		timeInInitializing, timeout)
+}
+
+// reconcileStableServeService keeps the stable <rayservice-name>-serve-svc in sync with the
+// active cluster during an incremental upgrade. This is necessary for both the gateway and
+// skipGateway paths:
+//
+//   - The stable service is initially created by the non-incremental upgrade code path (which
+//     uses rayService.Name as the service name). Once incremental upgrade is enabled,
+//     reconcileServicesToReadyCluster switches to per-cluster service names (rayCluster.Name)
+//     and the stable service is never touched again, leaving its selector pointing at the last
+//     cluster that was active before the first incremental upgrade.
+//
+//   - For skipGateway, the stable service is in the direct traffic path (fabric reads
+//     targetCapacity from the cluster and routes to this service). A stale selector means no
+//     endpoints → DNS NXDOMAIN for headless services.
+//
+//   - For gateway path, the stable service is bypassed for traffic (the HTTPRoute points to
+//     per-cluster services), but it is still a visible K8s resource that upgrade checkers and
+//     other tooling curl directly. A stale selector silently breaks those callers.
+//
+// Strategy:
+//   - If the stable service already exists: always update its selector to track the active cluster.
+//   - If it does not exist and spec.serveService is set: create it (handles the case where the
+//     RayService was deployed with incremental upgrade enabled from the start).
+//   - If it does not exist and spec.serveService is nil: nothing to do.
+func (r *RayServiceReconciler) reconcileStableServeService(ctx context.Context, rayServiceInstance *rayv1.RayService, activeCluster *rayv1.RayCluster) error {
+	logger := ctrl.LoggerFrom(ctx)
+
+	stableName := utils.GenerateServeServiceName(rayServiceInstance.Name)
+	labels := map[string]string{
+		utils.RayOriginatedFromCRNameLabelKey:  rayServiceInstance.Name,
+		utils.RayOriginatedFromCRDLabelKey:     utils.RayOriginatedFromCRDLabelValue(utils.RayServiceCRD),
+		utils.RayClusterServingServiceLabelKey: utils.GenerateServeServiceLabel(rayServiceInstance.Name),
+	}
+
+	// Build the desired selector: start with any user-provided selectors from spec.serveService
+	// (e.g. ray.io/node-type=worker for skipGateway worker-only routing), then stamp the
+	// mandatory labels on top so they cannot be overridden by the user.
+	selector := make(map[string]string)
+	if rayServiceInstance.Spec.ServeService != nil {
+		for k, v := range rayServiceInstance.Spec.ServeService.Spec.Selector {
+			selector[k] = v
+		}
+	}
+	selector[utils.RayClusterLabelKey] = activeCluster.Name
+	selector[utils.RayClusterServingServiceLabelKey] = utils.EnableRayClusterServingServiceTrue
+
+	existingSvc := &corev1.Service{}
+	err := r.Get(ctx, client.ObjectKey{Name: stableName, Namespace: rayServiceInstance.Namespace}, existingSvc)
+	if errors.IsNotFound(err) {
+		// Service does not exist. Only create it when the user has explicitly provided a
+		// spec.serveService; otherwise the stable service never existed and there is nothing to do.
+		if rayServiceInstance.Spec.ServeService == nil {
+			return nil
+		}
+		newSvc := rayServiceInstance.Spec.ServeService.DeepCopy()
+		newSvc.Name = stableName
+		newSvc.Namespace = rayServiceInstance.Namespace
+		newSvc.Labels = labels
+		newSvc.Spec.Selector = selector
+		if err := ctrl.SetControllerReference(rayServiceInstance, newSvc, r.Scheme); err != nil {
+			return err
+		}
+		logger.Info("Creating stable serve service for incremental upgrade.", "service", stableName)
+		if err := r.Create(ctx, newSvc); err != nil {
+			r.Recorder.Eventf(rayServiceInstance, corev1.EventTypeWarning, string(utils.FailedToCreateService), "Failed to create stable serve service %s/%s: %v", rayServiceInstance.Namespace, stableName, err)
+			return err
+		}
+		r.Recorder.Eventf(rayServiceInstance, corev1.EventTypeNormal, string(utils.CreatedService), "Created stable serve service %s/%s", rayServiceInstance.Namespace, stableName)
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	// Service exists — update selector if the active cluster changed.
+	if existingSvc.Spec.Selector[utils.RayClusterLabelKey] == activeCluster.Name {
+		return nil
+	}
+
+	logger.Info("Updating stable serve service selector to follow active cluster promotion.",
+		"service", stableName,
+		"oldCluster", existingSvc.Spec.Selector[utils.RayClusterLabelKey],
+		"newCluster", activeCluster.Name)
+	existingSvc.Spec.Selector = selector
+	existingSvc.Labels = labels
+	if err := r.Update(ctx, existingSvc); err != nil {
+		r.Recorder.Eventf(rayServiceInstance, corev1.EventTypeWarning, string(utils.FailedToUpdateService), "Failed to update stable serve service %s/%s: %v", rayServiceInstance.Namespace, stableName, err)
+		return err
+	}
+	r.Recorder.Eventf(rayServiceInstance, corev1.EventTypeNormal, string(utils.UpdatedService), "Updated stable serve service %s/%s selector to cluster %s", rayServiceInstance.Namespace, stableName, activeCluster.Name)
+	return nil
 }
 
 // reconcilePerClusterServeService reconciles a load-balancing serve service for a given RayCluster.
