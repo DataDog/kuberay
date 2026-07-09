@@ -11,9 +11,11 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 
 	rayv1 "github.com/ray-project/kuberay/ray-operator/apis/ray/v1"
 	"github.com/ray-project/kuberay/ray-operator/controllers/ray/utils"
+	"github.com/ray-project/kuberay/ray-operator/pkg/features"
 )
 
 var (
@@ -631,4 +633,73 @@ func validateLabelsForUserSpecifiedService(svc *corev1.Service, userLabels map[s
 			t.Errorf("Final labels should contain key=%s", k)
 		}
 	}
+}
+
+// TestBuildServeServiceForRayService_IncrementalUpgrade documents the per-cluster service
+// behaviour of BuildServeService when incremental upgrade is enabled.
+//
+// Under NewClusterWithIncrementalUpgrade, BuildServeService uses the RayCluster name (not the
+// RayService name) as the service name and ignores any user-provided spec.serveService. This is
+// intentional: per-cluster services are required so that the HTTPRoute/Gateway can weight traffic
+// between active and pending clusters independently.
+//
+// The consequence is that the stable <rayservice-name>-serve-svc created before incremental
+// upgrade was enabled (or when spec.serveService is used) becomes stale after the first cluster
+// promotion. The controller fills this gap via reconcileStableServeService.
+func TestBuildServeServiceForRayService_IncrementalUpgrade(t *testing.T) {
+	features.SetFeatureGateDuringTest(t, features.RayServiceIncrementalUpgrade, true)
+
+	cluster := &rayv1.RayCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "new-cluster", Namespace: "default"},
+		Spec: rayv1.RayClusterSpec{
+			HeadGroupSpec: rayv1.HeadGroupSpec{
+				ServiceType: corev1.ServiceTypeClusterIP,
+				Template: corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name: "ray-head",
+								Ports: []corev1.ContainerPort{
+									{Name: utils.ServingPortName, ContainerPort: 8000},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	rs := &rayv1.RayService{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-service", Namespace: "default"},
+		Spec: rayv1.RayServiceSpec{
+			UpgradeStrategy: &rayv1.RayServiceUpgradeStrategy{
+				Type: ptr.To(rayv1.NewClusterWithIncrementalUpgrade),
+			},
+			// spec.serveService with a custom worker-only selector (typical for skipGateway).
+			ServeService: &corev1.Service{
+				Spec: corev1.ServiceSpec{
+					Selector: map[string]string{"ray.io/node-type": "worker"},
+					Ports:    []corev1.ServicePort{{Name: utils.ServingPortName, Port: 8000}},
+				},
+			},
+			RayClusterSpec: rayv1.RayClusterSpec{
+				HeadGroupSpec: rayv1.HeadGroupSpec{ServiceType: corev1.ServiceTypeClusterIP},
+			},
+		},
+	}
+
+	svc, err := BuildServeServiceForRayService(context.Background(), *rs, *cluster)
+	require.NoError(t, err)
+
+	// Service is named after the cluster, not the RayService — this is the per-cluster service
+	// used by the HTTPRoute. The stable service is managed separately by reconcileStableServeService.
+	assert.Equal(t, utils.GenerateServeServiceName(cluster.Name), svc.Name,
+		"incremental upgrade: service name must be cluster-scoped, not rayservice-scoped")
+	assert.Equal(t, cluster.Name, svc.Spec.Selector[utils.RayClusterLabelKey],
+		"selector must point at the specific cluster")
+
+	// spec.serveService selectors are NOT merged here — that happens in reconcileStableServeService.
+	assert.NotContains(t, svc.Spec.Selector, "ray.io/node-type",
+		"per-cluster service must not carry user selectors from spec.serveService")
 }
