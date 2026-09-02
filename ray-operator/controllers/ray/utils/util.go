@@ -958,6 +958,14 @@ func FetchHeadServiceURL(ctx context.Context, cli client.Client, rayCluster *ray
 		return "", fmt.Errorf("%s port is not found", defaultPortName)
 	}
 
+	// Use the explicitly configured service name, when set, so that TLS verification matches
+	// a stable, admin-provided DNS SAN rather than the auto-generated head service name.
+	if domainSuffix := os.Getenv(KUBERAY_DASHBOARD_DOMAIN_SUFFIX); domainSuffix != "" {
+		if name := rayCluster.Spec.HeadGroupSpec.DashboardServiceName; name != "" {
+			return fmt.Sprintf("%s.%s.%s:%d", name, rayCluster.Namespace, domainSuffix, port), nil
+		}
+	}
+
 	domainName := GetClusterDomainName()
 	headServiceURL := fmt.Sprintf("%s.%s.svc.%s:%v",
 		headSvc.Name,
@@ -1069,20 +1077,13 @@ func GetRayDashboardClientFunc(mgr manager.Manager, useKubernetesProxy bool) fun
 
 		domainSuffix := os.Getenv(KUBERAY_DASHBOARD_DOMAIN_SUFFIX)
 		port := os.Getenv(KUBERAY_DASHBOARD_PORT)
-		var dashURL string
-		if domainSuffix != "" && rayCluster.Status.Head.PodIP != "" {
-			// Connect via pod IP so Go's TLS verifier uses the cert's IP SAN
-			// rather than the hostname. This avoids mismatches when the server
-			// cert is issued for a shared service name (e.g. via a sidecar
-			// proxy) rather than the per-cluster head service name.
-			if port != "" {
-				dashURL = fmt.Sprintf("https://%s:%s", rayCluster.Status.Head.PodIP, port)
-			} else {
-				dashURL = fmt.Sprintf("https://%s", rayCluster.Status.Head.PodIP)
-			}
-		} else {
-			dashURL = BuildDashboardURL(headSvcName, rayCluster.Namespace, domainSuffix, port, url)
+		// Use the explicitly configured service name, when set, so that TLS verification matches
+		// a stable, admin-provided DNS SAN rather than the auto-generated head service name.
+		dashHost := headSvcName
+		if rayCluster.Spec.HeadGroupSpec.DashboardServiceName != "" {
+			dashHost = rayCluster.Spec.HeadGroupSpec.DashboardServiceName
 		}
+		dashURL := BuildDashboardURL(dashHost, rayCluster.Namespace, domainSuffix, port, url)
 
 		dashboardClient.InitClient(httpClient, dashURL, authToken)
 

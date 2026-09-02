@@ -114,6 +114,19 @@ type HeadGroupSpec struct {
 	// ServiceType is Kubernetes service type of the head service. it will be used by the workers to connect to the head pod
 	// +optional
 	ServiceType corev1.ServiceType `json:"serviceType,omitempty"`
+	// DashboardServiceName overrides the head service name used when constructing the dashboard client's
+	// HTTPS URL. It is only used when the operator is configured to build dashboard URLs from a domain
+	// suffix (see the KUBERAY_DASHBOARD_DOMAIN_SUFFIX operator environment variable) and is not the
+	// name of a Kubernetes Service that the operator will look up; it is only interpolated into the
+	// hostname used for the dashboard connection.
+	//
+	// Set this when the DNS name the dashboard endpoint's TLS certificate was issued for does not match
+	// the auto-generated head service name, for example when several clusters are addressed through a
+	// shared identity behind a common TLS-terminating proxy.
+	// Must be a valid RFC 1123 DNS label (no dots).
+	// +optional
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	DashboardServiceName string `json:"dashboardServiceName,omitempty"`
 }
 
 // WorkerGroupSpec are the specs for the worker pods
