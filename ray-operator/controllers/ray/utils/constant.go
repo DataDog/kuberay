@@ -223,16 +223,15 @@ const (
 	// KUBERAY_DASHBOARD_TLS_CLIENT_CERT  – path to the PEM client cert presented during mTLS handshake.
 	// KUBERAY_DASHBOARD_TLS_CLIENT_KEY   – path to the PEM private key for the client cert.
 	//   All three TLS vars must be set together for mTLS; only KUBERAY_DASHBOARD_TLS_CA_CERT is needed for one-way TLS.
-	// KUBERAY_DASHBOARD_TLS_SERVER_NAME  – overrides the server name used for TLS certificate verification.
-	//   Only needed when the pod IP is unavailable and the server cert is issued for a different name than
-	//   the host in the dashboard URL. When the pod IP is available, the operator connects by IP and verifies
-	//   against the cert's IP SAN, so this override is not required.
-	KUBERAY_DASHBOARD_DOMAIN_SUFFIX    = "KUBERAY_DASHBOARD_DOMAIN_SUFFIX"
-	KUBERAY_DASHBOARD_PORT             = "KUBERAY_DASHBOARD_PORT"
-	KUBERAY_DASHBOARD_TLS_CA_CERT      = "KUBERAY_DASHBOARD_TLS_CA_CERT"
-	KUBERAY_DASHBOARD_TLS_CLIENT_CERT  = "KUBERAY_DASHBOARD_TLS_CLIENT_CERT"
-	KUBERAY_DASHBOARD_TLS_CLIENT_KEY   = "KUBERAY_DASHBOARD_TLS_CLIENT_KEY"
-	KUBERAY_DASHBOARD_TLS_SERVER_NAME  = "KUBERAY_DASHBOARD_TLS_SERVER_NAME"
+	//
+	// If the dashboard server cert's SAN doesn't match the auto-generated head service name, set
+	// HeadGroupSpec.DashboardServiceName on the RayCluster/RayJob/RayService to override the hostname
+	// used when constructing the dashboard URL.
+	KUBERAY_DASHBOARD_DOMAIN_SUFFIX   = "KUBERAY_DASHBOARD_DOMAIN_SUFFIX"
+	KUBERAY_DASHBOARD_PORT            = "KUBERAY_DASHBOARD_PORT"
+	KUBERAY_DASHBOARD_TLS_CA_CERT     = "KUBERAY_DASHBOARD_TLS_CA_CERT"
+	KUBERAY_DASHBOARD_TLS_CLIENT_CERT = "KUBERAY_DASHBOARD_TLS_CLIENT_CERT"
+	KUBERAY_DASHBOARD_TLS_CLIENT_KEY  = "KUBERAY_DASHBOARD_TLS_CLIENT_KEY"
 
 	// Ray core default configurations
 	DefaultWorkerRayGcsReconnectTimeoutS = "600"

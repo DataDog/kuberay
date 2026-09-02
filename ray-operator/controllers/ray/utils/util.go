@@ -994,10 +994,6 @@ func newDashboardHTTPClient() (*http.Client, error) {
 
 	tlsCfg := &tls.Config{}
 
-	if sn := os.Getenv(KUBERAY_DASHBOARD_TLS_SERVER_NAME); sn != "" {
-		tlsCfg.ServerName = sn
-	}
-
 	if caFile != "" {
 		caPEM, err := os.ReadFile(caFile)
 		if err != nil {
