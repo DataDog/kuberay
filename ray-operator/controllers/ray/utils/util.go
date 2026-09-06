@@ -958,14 +958,6 @@ func FetchHeadServiceURL(ctx context.Context, cli client.Client, rayCluster *ray
 		return "", fmt.Errorf("%s port is not found", defaultPortName)
 	}
 
-	// Use the explicitly configured service name, when set, so that TLS verification matches
-	// a stable, admin-provided DNS SAN rather than the auto-generated head service name.
-	if domainSuffix := os.Getenv(KUBERAY_DASHBOARD_DOMAIN_SUFFIX); domainSuffix != "" {
-		if name := rayCluster.Spec.HeadGroupSpec.DashboardServiceName; name != "" {
-			return fmt.Sprintf("%s.%s.%s:%d", name, rayCluster.Namespace, domainSuffix, port), nil
-		}
-	}
-
 	domainName := GetClusterDomainName()
 	headServiceURL := fmt.Sprintf("%s.%s.svc.%s:%v",
 		headSvc.Name,
@@ -979,7 +971,13 @@ func FetchHeadServiceURL(ctx context.Context, cli client.Client, rayCluster *ray
 // When the KUBERAY_DASHBOARD_TLS_* environment variables are set it configures
 // TLS (one-way) or mTLS (when client cert+key are also provided); otherwise it
 // returns a plain client suitable for plain HTTP connections.
-func newDashboardHTTPClient() (*http.Client, error) {
+//
+// serverName, when non-empty, overrides the name used to verify the server's TLS
+// certificate. It is independent of the address actually dialed: the operator always
+// dials the real head service for the specific RayCluster generation being checked,
+// but the certificate presented there may carry a different, stable SAN (see
+// HeadGroupSpec.DashboardTLSServerName).
+func newDashboardHTTPClient(serverName string) (*http.Client, error) {
 	caFile := os.Getenv(KUBERAY_DASHBOARD_TLS_CA_CERT)
 	certFile := os.Getenv(KUBERAY_DASHBOARD_TLS_CLIENT_CERT)
 	keyFile := os.Getenv(KUBERAY_DASHBOARD_TLS_CLIENT_KEY)
@@ -993,6 +991,9 @@ func newDashboardHTTPClient() (*http.Client, error) {
 	}
 
 	tlsCfg := &tls.Config{}
+	if serverName != "" {
+		tlsCfg.ServerName = serverName
+	}
 
 	if caFile != "" {
 		caPEM, err := os.ReadFile(caFile)
@@ -1066,20 +1067,17 @@ func GetRayDashboardClientFunc(mgr manager.Manager, useKubernetesProxy bool) fun
 			return nil, fmt.Errorf("failed to construct Ray dashboard client: %w", err)
 		}
 
-		httpClient, err := newDashboardHTTPClient()
+		httpClient, err := newDashboardHTTPClient(rayCluster.Spec.HeadGroupSpec.DashboardTLSServerName)
 		if err != nil {
 			return nil, fmt.Errorf("failed to construct Ray dashboard client: %w", err)
 		}
 
 		domainSuffix := os.Getenv(KUBERAY_DASHBOARD_DOMAIN_SUFFIX)
 		port := os.Getenv(KUBERAY_DASHBOARD_PORT)
-		// Use the explicitly configured service name, when set, so that TLS verification matches
-		// a stable, admin-provided DNS SAN rather than the auto-generated head service name.
-		dashHost := headSvcName
-		if rayCluster.Spec.HeadGroupSpec.DashboardServiceName != "" {
-			dashHost = rayCluster.Spec.HeadGroupSpec.DashboardServiceName
-		}
-		dashURL := BuildDashboardURL(dashHost, rayCluster.Namespace, domainSuffix, port, url)
+		// Always dial the real head service for this specific RayCluster generation. TLS
+		// verification, when needed, is handled separately via DashboardTLSServerName above —
+		// it never changes which address is dialed.
+		dashURL := BuildDashboardURL(headSvcName, rayCluster.Namespace, domainSuffix, port, url)
 
 		dashboardClient.InitClient(httpClient, dashURL, authToken)
 

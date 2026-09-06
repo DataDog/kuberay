@@ -1891,10 +1891,11 @@ func TestNewDashboardHTTPClient(t *testing.T) {
 	caFile := writeTempPEM(t, caCertPEM)
 
 	tests := []struct {
-		name    string
-		envVars map[string]string
-		wantTLS bool
-		wantErr string
+		name       string
+		envVars    map[string]string
+		serverName string
+		wantTLS    bool
+		wantErr    string
 	}{
 		{
 			name:    "no env vars — returns plain HTTP client",
@@ -1929,6 +1930,14 @@ func TestNewDashboardHTTPClient(t *testing.T) {
 			},
 			wantErr: KUBERAY_DASHBOARD_TLS_CLIENT_CERT,
 		},
+		{
+			name: "CA cert with server name override — ServerName set independently of dial address",
+			envVars: map[string]string{
+				KUBERAY_DASHBOARD_TLS_CA_CERT: caFile,
+			},
+			serverName: "my-rayservice-head-svc",
+			wantTLS:    true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -1937,7 +1946,7 @@ func TestNewDashboardHTTPClient(t *testing.T) {
 				t.Setenv(k, v)
 			}
 
-			client, err := newDashboardHTTPClient()
+			client, err := newDashboardHTTPClient(tt.serverName)
 
 			if tt.wantErr != "" {
 				assert.Error(t, err)
@@ -1954,6 +1963,7 @@ func TestNewDashboardHTTPClient(t *testing.T) {
 				assert.True(t, hasTLSTransport, "expected TLS transport")
 				assert.NotNil(t, transport.TLSClientConfig)
 				assert.NotNil(t, transport.TLSClientConfig.RootCAs)
+				assert.Equal(t, tt.serverName, transport.TLSClientConfig.ServerName)
 			} else {
 				assert.False(t, hasTLSTransport, "expected plain client with no custom transport")
 			}

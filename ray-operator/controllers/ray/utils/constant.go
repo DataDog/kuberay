@@ -224,9 +224,11 @@ const (
 	// KUBERAY_DASHBOARD_TLS_CLIENT_KEY   – path to the PEM private key for the client cert.
 	//   All three TLS vars must be set together for mTLS; only KUBERAY_DASHBOARD_TLS_CA_CERT is needed for one-way TLS.
 	//
-	// If the dashboard server cert's SAN doesn't match the auto-generated head service name, set
-	// HeadGroupSpec.DashboardServiceName on the RayCluster/RayJob/RayService to override the hostname
-	// used when constructing the dashboard URL.
+	// The operator always dials the real, auto-generated head service for the RayCluster generation
+	// being checked. If the dashboard server cert's SAN doesn't match that name (e.g. several
+	// RayCluster generations, as with a RayService upgrade, or several clusters share one TLS
+	// identity behind a common TLS-terminating proxy), set HeadGroupSpec.DashboardTLSServerName on
+	// the RayCluster/RayJob/RayService to override only the name used for TLS verification.
 	KUBERAY_DASHBOARD_DOMAIN_SUFFIX   = "KUBERAY_DASHBOARD_DOMAIN_SUFFIX"
 	KUBERAY_DASHBOARD_PORT            = "KUBERAY_DASHBOARD_PORT"
 	KUBERAY_DASHBOARD_TLS_CA_CERT     = "KUBERAY_DASHBOARD_TLS_CA_CERT"

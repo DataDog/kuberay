@@ -10,14 +10,14 @@ import (
 // HeadGroupSpecApplyConfiguration represents a declarative configuration of the HeadGroupSpec type for use
 // with apply.
 type HeadGroupSpecApplyConfiguration struct {
-	Template             *corev1.PodTemplateSpecApplyConfiguration `json:"template,omitempty"`
-	HeadService          *apicorev1.Service                        `json:"headService,omitempty"`
-	EnableIngress        *bool                                     `json:"enableIngress,omitempty"`
-	Resources            map[string]string                         `json:"resources,omitempty"`
-	Labels               map[string]string                         `json:"labels,omitempty"`
-	RayStartParams       map[string]string                         `json:"rayStartParams,omitempty"`
-	ServiceType          *apicorev1.ServiceType                    `json:"serviceType,omitempty"`
-	DashboardServiceName *string                                   `json:"dashboardServiceName,omitempty"`
+	Template               *corev1.PodTemplateSpecApplyConfiguration `json:"template,omitempty"`
+	HeadService            *apicorev1.Service                        `json:"headService,omitempty"`
+	EnableIngress          *bool                                     `json:"enableIngress,omitempty"`
+	Resources              map[string]string                         `json:"resources,omitempty"`
+	Labels                 map[string]string                         `json:"labels,omitempty"`
+	RayStartParams         map[string]string                         `json:"rayStartParams,omitempty"`
+	ServiceType            *apicorev1.ServiceType                    `json:"serviceType,omitempty"`
+	DashboardTLSServerName *string                                   `json:"dashboardTlsServerName,omitempty"`
 }
 
 // HeadGroupSpecApplyConfiguration constructs a declarative configuration of the HeadGroupSpec type for use with
@@ -100,10 +100,10 @@ func (b *HeadGroupSpecApplyConfiguration) WithServiceType(value apicorev1.Servic
 	return b
 }
 
-// WithDashboardServiceName sets the DashboardServiceName field in the declarative configuration to the given value
+// WithDashboardTLSServerName sets the DashboardTLSServerName field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
-// If called multiple times, the DashboardServiceName field is set to the value of the last call.
-func (b *HeadGroupSpecApplyConfiguration) WithDashboardServiceName(value string) *HeadGroupSpecApplyConfiguration {
-	b.DashboardServiceName = &value
+// If called multiple times, the DashboardTLSServerName field is set to the value of the last call.
+func (b *HeadGroupSpecApplyConfiguration) WithDashboardTLSServerName(value string) *HeadGroupSpecApplyConfiguration {
+	b.DashboardTLSServerName = &value
 	return b
 }
