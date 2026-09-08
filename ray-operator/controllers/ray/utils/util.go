@@ -76,25 +76,33 @@ func GetClusterDomainName() string {
 }
 
 // BuildDashboardURL constructs the dashboard URL for a given head service name and namespace.
-// If domainSuffix is non-empty, it constructs an HTTPS URL using the custom domain with the format:
+// If domainSuffix is non-empty, it constructs a URL using the custom domain with the format:
 //
-//	https://<headSvcName>.<namespace>.<domainSuffix>[:<port>]
+//	<scheme>://<headSvcName>.<namespace>.<domainSuffix>[:<port>]
 //
 // domainSuffix should include any Kubernetes subdomain prefix, e.g.:
 //
 //	"svc.example.com"
 //	→ raycluster-head-svc.my-namespace.svc.example.com:8266
 //
+// useTLS selects the scheme (https vs http) and must be kept in sync with whatever
+// scheme newDashboardHTTPClient decided to use for this same RayCluster, or the client
+// and the URL it dials will disagree.
+//
 // If domainSuffix is empty it falls back to the plain HTTP URL built from fallbackURL
 // (backwards-compatible default behaviour).
-func BuildDashboardURL(headSvcName, namespace, domainSuffix, port, fallbackURL string) string {
+func BuildDashboardURL(headSvcName, namespace, domainSuffix, port, fallbackURL string, useTLS bool) string {
 	if domainSuffix == "" {
 		return "http://" + fallbackURL
 	}
-	if port != "" {
-		return fmt.Sprintf("https://%s.%s.%s:%s", headSvcName, namespace, domainSuffix, port)
+	scheme := "http"
+	if useTLS {
+		scheme = "https"
 	}
-	return fmt.Sprintf("https://%s.%s.%s", headSvcName, namespace, domainSuffix)
+	if port != "" {
+		return fmt.Sprintf("%s://%s.%s.%s:%s", scheme, headSvcName, namespace, domainSuffix, port)
+	}
+	return fmt.Sprintf("%s://%s.%s.%s", scheme, headSvcName, namespace, domainSuffix)
 }
 
 // IsCreated returns true if pod has been created and is maintained by the API server
@@ -968,23 +976,29 @@ func FetchHeadServiceURL(ctx context.Context, cli client.Client, rayCluster *ray
 }
 
 // newDashboardHTTPClient builds an *http.Client for dashboard connections.
-// When the KUBERAY_DASHBOARD_TLS_* environment variables are set it configures
-// TLS (one-way) or mTLS (when client cert+key are also provided); otherwise it
-// returns a plain client suitable for plain HTTP connections.
 //
-// serverName, when non-empty, overrides the name used to verify the server's TLS
-// certificate. It is independent of the address actually dialed: the operator always
-// dials the real head service for the specific RayCluster generation being checked,
-// but the certificate presented there may carry a different, stable SAN (see
-// HeadGroupSpec.DashboardTLSServerName).
+// TEMPORARY/TESTING GATE: TLS is only attempted when serverName (the RayCluster's
+// HeadGroupSpec.DashboardTLSServerName, qualified) is non-empty. This lets an operator
+// build with the KUBERAY_DASHBOARD_TLS_* env vars set cluster-wide be deployed onto a
+// shared cluster for testing without forcing TLS onto every other tenant's RayCluster —
+// only RayClusters that explicitly opt in via DashboardTLSServerName are affected.
+// TODO: revisit this gate once the fabric-mTLS rollout is no longer opt-in per-cluster.
+//
+// When TLS is attempted, the KUBERAY_DASHBOARD_TLS_* environment variables still supply
+// the actual credentials (CA cert for verification, client cert+key for mTLS).
+//
+// serverName overrides the name used to verify the server's TLS certificate. It is
+// independent of the address actually dialed: the operator always dials the real head
+// service for the specific RayCluster generation being checked, but the certificate
+// presented there may carry a different, stable SAN.
 func newDashboardHTTPClient(serverName string) (*http.Client, error) {
+	if serverName == "" {
+		return &http.Client{Timeout: 2 * time.Second}, nil
+	}
+
 	caFile := os.Getenv(KUBERAY_DASHBOARD_TLS_CA_CERT)
 	certFile := os.Getenv(KUBERAY_DASHBOARD_TLS_CLIENT_CERT)
 	keyFile := os.Getenv(KUBERAY_DASHBOARD_TLS_CLIENT_KEY)
-
-	if caFile == "" && certFile == "" && keyFile == "" {
-		return &http.Client{Timeout: 2 * time.Second}, nil
-	}
 
 	if (certFile == "") != (keyFile == "") {
 		return nil, fmt.Errorf("%s and %s must both be set for mTLS", KUBERAY_DASHBOARD_TLS_CLIENT_CERT, KUBERAY_DASHBOARD_TLS_CLIENT_KEY)
@@ -1086,8 +1100,10 @@ func GetRayDashboardClientFunc(mgr manager.Manager, useKubernetesProxy bool) fun
 
 		// Always dial the real head service for this specific RayCluster generation. TLS
 		// verification, when needed, is handled separately via DashboardTLSServerName above —
-		// it never changes which address is dialed.
-		dashURL := BuildDashboardURL(headSvcName, rayCluster.Namespace, domainSuffix, port, url)
+		// it never changes which address is dialed. useTLS mirrors the same gate as
+		// newDashboardHTTPClient so the URL scheme and client never disagree.
+		useTLS := serverName != ""
+		dashURL := BuildDashboardURL(headSvcName, rayCluster.Namespace, domainSuffix, port, url, useTLS)
 
 		dashboardClient.InitClient(httpClient, dashURL, authToken)
 

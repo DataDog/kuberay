@@ -1810,6 +1810,7 @@ func TestBuildDashboardURL(t *testing.T) {
 		domainSuffix string
 		port         string
 		fallbackURL  string
+		useTLS       bool
 		want         string
 	}{
 		{
@@ -1819,6 +1820,7 @@ func TestBuildDashboardURL(t *testing.T) {
 			domainSuffix: "",
 			port:         "",
 			fallbackURL:  "10.0.0.1:8265",
+			useTLS:       true,
 			want:         "http://10.0.0.1:8265",
 		},
 		{
@@ -1828,25 +1830,38 @@ func TestBuildDashboardURL(t *testing.T) {
 			domainSuffix: "",
 			port:         "8266",
 			fallbackURL:  "10.0.0.1:8265",
+			useTLS:       true,
 			want:         "http://10.0.0.1:8265",
 		},
 		{
-			name:         "suffix includes svc. — constructs HTTPS URL with namespace and port",
+			name:         "suffix includes svc. and useTLS — constructs HTTPS URL with namespace and port",
 			headSvcName:  "raycluster-head-svc",
 			namespace:    "my-namespace",
 			domainSuffix: "svc.example.com",
 			port:         "8266",
 			fallbackURL:  "10.0.0.1:8265",
+			useTLS:       true,
 			want:         "https://raycluster-head-svc.my-namespace.svc.example.com:8266",
 		},
 		{
-			name:         "suffix includes svc. — constructs HTTPS URL with namespace, no port",
+			name:         "suffix includes svc. and useTLS — constructs HTTPS URL with namespace, no port",
 			headSvcName:  "raycluster-head-svc",
 			namespace:    "my-namespace",
 			domainSuffix: "svc.example.com",
 			port:         "",
 			fallbackURL:  "10.0.0.1:8265",
+			useTLS:       true,
 			want:         "https://raycluster-head-svc.my-namespace.svc.example.com",
+		},
+		{
+			name:         "suffix includes svc. but useTLS is false — constructs HTTP URL",
+			headSvcName:  "raycluster-head-svc",
+			namespace:    "my-namespace",
+			domainSuffix: "svc.example.com",
+			port:         "8266",
+			fallbackURL:  "10.0.0.1:8265",
+			useTLS:       false,
+			want:         "http://raycluster-head-svc.my-namespace.svc.example.com:8266",
 		},
 		{
 			name:         "custom head service name with dashes in different namespace",
@@ -1855,6 +1870,7 @@ func TestBuildDashboardURL(t *testing.T) {
 			domainSuffix: "svc.prod.example.com",
 			port:         "443",
 			fallbackURL:  "10.0.0.2:8265",
+			useTLS:       true,
 			want:         "https://my-cluster-kuberay-head-svc.ml-team.svc.prod.example.com:443",
 		},
 		{
@@ -1864,6 +1880,7 @@ func TestBuildDashboardURL(t *testing.T) {
 			domainSuffix: "mesh.example.com",
 			port:         "",
 			fallbackURL:  "10.0.0.1:8265",
+			useTLS:       true,
 			want:         "https://my-ray-cluster-head-svc.my-namespace.mesh.example.com",
 		},
 		{
@@ -1873,13 +1890,14 @@ func TestBuildDashboardURL(t *testing.T) {
 			domainSuffix: "",
 			port:         "",
 			fallbackURL:  "",
+			useTLS:       true,
 			want:         "http://",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := BuildDashboardURL(tt.headSvcName, tt.namespace, tt.domainSuffix, tt.port, tt.fallbackURL)
+			got := BuildDashboardURL(tt.headSvcName, tt.namespace, tt.domainSuffix, tt.port, tt.fallbackURL, tt.useTLS)
 			assert.Equal(t, tt.want, got)
 		})
 	}
@@ -1898,37 +1916,53 @@ func TestNewDashboardHTTPClient(t *testing.T) {
 		wantErr    string
 	}{
 		{
-			name:    "no env vars — returns plain HTTP client",
+			name:    "no env vars, no server name — returns plain HTTP client",
 			envVars: map[string]string{},
 			wantTLS: false,
 		},
 		{
-			name: "only CA cert — one-way TLS, custom RootCAs set",
+			name: "env vars set but server name empty — TEMPORARY gate keeps plain HTTP",
 			envVars: map[string]string{
 				KUBERAY_DASHBOARD_TLS_CA_CERT: caFile,
 			},
-			wantTLS: true,
+			wantTLS: false,
 		},
 		{
-			name: "CA cert file missing — error",
+			name:       "server name set but no env vars — TLS with system CA pool, no client cert",
+			serverName: "my-rayservice-head-svc",
+			wantTLS:    true,
+		},
+		{
+			name: "server name set with CA cert — one-way TLS, custom RootCAs set",
+			envVars: map[string]string{
+				KUBERAY_DASHBOARD_TLS_CA_CERT: caFile,
+			},
+			serverName: "my-rayservice-head-svc",
+			wantTLS:    true,
+		},
+		{
+			name: "server name set, CA cert file missing — error",
 			envVars: map[string]string{
 				KUBERAY_DASHBOARD_TLS_CA_CERT: "/nonexistent/ca.pem",
 			},
-			wantErr: "failed to read dashboard CA cert",
+			serverName: "my-rayservice-head-svc",
+			wantErr:    "failed to read dashboard CA cert",
 		},
 		{
-			name: "cert without key — error",
+			name: "server name set, cert without key — error",
 			envVars: map[string]string{
 				KUBERAY_DASHBOARD_TLS_CLIENT_CERT: caFile,
 			},
-			wantErr: KUBERAY_DASHBOARD_TLS_CLIENT_CERT,
+			serverName: "my-rayservice-head-svc",
+			wantErr:    KUBERAY_DASHBOARD_TLS_CLIENT_CERT,
 		},
 		{
-			name: "key without cert — error",
+			name: "server name set, key without cert — error",
 			envVars: map[string]string{
 				KUBERAY_DASHBOARD_TLS_CLIENT_KEY: caFile,
 			},
-			wantErr: KUBERAY_DASHBOARD_TLS_CLIENT_CERT,
+			serverName: "my-rayservice-head-svc",
+			wantErr:    KUBERAY_DASHBOARD_TLS_CLIENT_CERT,
 		},
 		{
 			name: "CA cert with server name override — ServerName set independently of dial address",
@@ -1962,7 +1996,9 @@ func TestNewDashboardHTTPClient(t *testing.T) {
 			if tt.wantTLS {
 				assert.True(t, hasTLSTransport, "expected TLS transport")
 				assert.NotNil(t, transport.TLSClientConfig)
-				assert.NotNil(t, transport.TLSClientConfig.RootCAs)
+				if tt.envVars[KUBERAY_DASHBOARD_TLS_CA_CERT] != "" {
+					assert.NotNil(t, transport.TLSClientConfig.RootCAs)
+				}
 				assert.Equal(t, tt.serverName, transport.TLSClientConfig.ServerName)
 			} else {
 				assert.False(t, hasTLSTransport, "expected plain client with no custom transport")
