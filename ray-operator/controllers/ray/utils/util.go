@@ -1102,8 +1102,20 @@ func GetRayDashboardClientFunc(mgr manager.Manager, useKubernetesProxy bool) fun
 		// verification, when needed, is handled separately via DashboardTLSServerName above —
 		// it never changes which address is dialed. useTLS mirrors the same gate as
 		// newDashboardHTTPClient so the URL scheme and client never disagree.
+		//
+		// TEMPORARY/TESTING GATE (cont'd): KUBERAY_DASHBOARD_DOMAIN_SUFFIX/PORT route through
+		// a mesh-intercepted port that only understands registered mTLS identities. A
+		// RayCluster that hasn't opted in via DashboardTLSServerName has no such identity, so
+		// it must never be routed onto that FQDN/port — fall back to the plain, directly
+		// dialable fallbackURL (passed in as `url`) instead. Without this, setting the env
+		// vars operator-wide would still redirect every other tenant's dashboard traffic onto
+		// the mesh port and break them, even though their TLS client stays disabled.
 		useTLS := serverName != ""
-		dashURL := BuildDashboardURL(headSvcName, rayCluster.Namespace, domainSuffix, port, url, useTLS)
+		effectiveDomainSuffix := domainSuffix
+		if !useTLS {
+			effectiveDomainSuffix = ""
+		}
+		dashURL := BuildDashboardURL(headSvcName, rayCluster.Namespace, effectiveDomainSuffix, port, url, useTLS)
 
 		dashboardClient.InitClient(httpClient, dashURL, authToken)
 
