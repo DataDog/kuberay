@@ -1067,13 +1067,23 @@ func GetRayDashboardClientFunc(mgr manager.Manager, useKubernetesProxy bool) fun
 			return nil, fmt.Errorf("failed to construct Ray dashboard client: %w", err)
 		}
 
-		httpClient, err := newDashboardHTTPClient(rayCluster.Spec.HeadGroupSpec.DashboardTLSServerName)
+		domainSuffix := os.Getenv(KUBERAY_DASHBOARD_DOMAIN_SUFFIX)
+		port := os.Getenv(KUBERAY_DASHBOARD_PORT)
+
+		// Qualify the override the same way the dial address itself is qualified below
+		// (<name>.<namespace>.<domainSuffix>), so a bare identity shared across several
+		// RayCluster generations/namespaces still resolves to the namespace-specific SAN
+		// on the certificate.
+		serverName := rayCluster.Spec.HeadGroupSpec.DashboardTLSServerName
+		if serverName != "" && domainSuffix != "" {
+			serverName = fmt.Sprintf("%s.%s.%s", serverName, rayCluster.Namespace, domainSuffix)
+		}
+
+		httpClient, err := newDashboardHTTPClient(serverName)
 		if err != nil {
 			return nil, fmt.Errorf("failed to construct Ray dashboard client: %w", err)
 		}
 
-		domainSuffix := os.Getenv(KUBERAY_DASHBOARD_DOMAIN_SUFFIX)
-		port := os.Getenv(KUBERAY_DASHBOARD_PORT)
 		// Always dial the real head service for this specific RayCluster generation. TLS
 		// verification, when needed, is handled separately via DashboardTLSServerName above —
 		// it never changes which address is dialed.
