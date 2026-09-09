@@ -114,6 +114,21 @@ type HeadGroupSpec struct {
 	// ServiceType is Kubernetes service type of the head service. it will be used by the workers to connect to the head pod
 	// +optional
 	ServiceType corev1.ServiceType `json:"serviceType,omitempty"`
+	// DashboardTLSServerName overrides the server name used to verify the dashboard endpoint's TLS
+	// certificate. It does not affect which address the operator dials — the operator always dials
+	// the head service for the specific RayCluster generation being checked.
+	//
+	// The operator qualifies this value the same way it builds the dial address: the effective
+	// TLS server name is "<DashboardTLSServerName>.<namespace>.<KUBERAY_DASHBOARD_DOMAIN_SUFFIX>".
+	//
+	// Set this when the DNS name the dashboard endpoint's TLS certificate was issued for does not match
+	// the auto-generated head service name, for example when several RayCluster generations (as with a
+	// RayService upgrade) or several clusters are addressed through a shared identity behind a common
+	// TLS-terminating proxy.
+	// Must be a valid RFC 1123 DNS label (no dots).
+	// +optional
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	DashboardTLSServerName string `json:"dashboardTlsServerName,omitempty"`
 }
 
 // WorkerGroupSpec are the specs for the worker pods
