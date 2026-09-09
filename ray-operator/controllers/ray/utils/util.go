@@ -1117,6 +1117,15 @@ func GetRayDashboardClientFunc(mgr manager.Manager, useKubernetesProxy bool) fun
 		}
 		dashURL := BuildDashboardURL(headSvcName, rayCluster.Namespace, effectiveDomainSuffix, port, url, useTLS)
 
+		ctrl.Log.WithName("controllers").WithName("Dashboard").Info(
+			"Constructed Ray dashboard client",
+			"RayCluster", rayCluster.Name,
+			"namespace", rayCluster.Namespace,
+			"dashboardURL", dashURL,
+			"useTLS", useTLS,
+			"dashboardTLSServerName", serverName,
+		)
+
 		dashboardClient.InitClient(httpClient, dashURL, authToken)
 
 		return dashboardClient, nil
