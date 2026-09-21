@@ -32,6 +32,11 @@ const (
 	RayJobSubmissionModeLabelKey             = "ray.io/job-submission-mode"
 	// DisableProvisionedHeadRestartAnnotationKey marks RayClusters created for sidecar-mode RayJobs to skip head Pod recreation after provisioning.
 	DisableProvisionedHeadRestartAnnotationKey = "ray.io/disable-provisioned-head-restart"
+	// ActiveWorkerSnapshotKey records the active cluster's AvailableWorkerReplicas at the moment
+	// a pending cluster is created for a skipGateway incremental upgrade. isPendingClusterCapacityReady
+	// uses this snapshot instead of the live active count so that autoscaling on the active cluster
+	// during the upgrade does not raise the parity bar and stall promotion.
+	ActiveWorkerSnapshotKey = "ray.io/active-worker-snapshot"
 
 	// Labels for feature RayMultihostIndexing
 	//
