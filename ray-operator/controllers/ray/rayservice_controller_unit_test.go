@@ -1005,7 +1005,7 @@ func TestConstructRayClusterForRayService(t *testing.T) {
 			rayService.Name = "test-service"
 			rayService.Namespace = "test-namespace"
 			clusterName := "test-cluster"
-			rayCluster, err := constructRayClusterForRayService(&rayService, clusterName, scheme.Scheme)
+			rayCluster, err := constructRayClusterForRayService(&rayService, clusterName, scheme.Scheme, nil)
 			require.NoError(t, err)
 
 			// Check ObjectMeta of the RayCluster
@@ -2652,6 +2652,14 @@ func makeClusterWithWorkers(available int32, maxReplicas int32) *rayv1.RayCluste
 	}
 }
 
+func makeClusterWithWorkersAndSnapshot(available int32, maxReplicas int32, snapshot int32) *rayv1.RayCluster {
+	c := makeClusterWithWorkers(available, maxReplicas)
+	c.Annotations = map[string]string{
+		utils.ActiveWorkerSnapshotKey: strconv.FormatInt(int64(snapshot), 10),
+	}
+	return c
+}
+
 func makeHealthyApps() map[string]rayv1.AppStatus {
 	return map[string]rayv1.AppStatus{
 		"app": {
@@ -2696,6 +2704,28 @@ func TestIsPendingClusterCapacityReady(t *testing.T) {
 		active := makeClusterWithWorkers(3, 5)
 		pending := makeClusterWithWorkers(0, 5) // ceil(0%*3)=0 workers needed
 		assert.True(t, isPendingClusterCapacityReady(makeHealthyApps(), active, pending, 0))
+	})
+
+	t.Run("snapshot overrides live active count: active scaled up mid-upgrade but snapshot is used", func(t *testing.T) {
+		// Active cluster scaled from 3→5 during upgrade. Without snapshot, TC=100 would require
+		// pending to have 5 workers. With snapshot=3, pending only needs 3.
+		active := makeClusterWithWorkers(5, 5)                // live count is now 5
+		pending := makeClusterWithWorkersAndSnapshot(3, 5, 3) // snapshot=3 (original active count)
+		assert.True(t, isPendingClusterCapacityReady(makeHealthyApps(), active, pending, 100))
+	})
+
+	t.Run("snapshot overrides live active count: pending insufficient against snapshot", func(t *testing.T) {
+		// Snapshot=3, pending only has 2 workers — should still block.
+		active := makeClusterWithWorkers(5, 5)
+		pending := makeClusterWithWorkersAndSnapshot(2, 5, 3)
+		assert.False(t, isPendingClusterCapacityReady(makeHealthyApps(), active, pending, 100))
+	})
+
+	t.Run("falls back to live active count when snapshot annotation absent", func(t *testing.T) {
+		// No annotation: old behavior — uses live active count (3). Pending has 2, needs ceil(100%*3)=3.
+		active := makeClusterWithWorkers(3, 5)
+		pending := makeClusterWithWorkers(2, 5)
+		assert.False(t, isPendingClusterCapacityReady(makeHealthyApps(), active, pending, 100))
 	})
 }
 

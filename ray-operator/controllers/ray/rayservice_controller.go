@@ -924,14 +924,14 @@ func (r *RayServiceReconciler) reconcileRayCluster(ctx context.Context, rayServi
 
 	if rayServiceInstance.Status.PendingServiceStatus.RayClusterName != "" && pendingRayCluster == nil {
 		logger.Info("Creating a new pending RayCluster instance")
-		pendingRayCluster, err = r.createRayClusterInstance(ctx, rayServiceInstance)
+		pendingRayCluster, err = r.createRayClusterInstance(ctx, rayServiceInstance, activeRayCluster)
 		return activeRayCluster, pendingRayCluster, err
 	}
 
 	if shouldUpdateCluster(rayServiceInstance, activeRayCluster, true) {
 		// TODO(kevin85421): We should not reconstruct the cluster to update it. This will cause issues if autoscaler is enabled.
 		logger.Info("Updating the active RayCluster instance", "clusterName", activeRayCluster.Name)
-		goalCluster, err := constructRayClusterForRayService(rayServiceInstance, activeRayCluster.Name, r.Scheme)
+		goalCluster, err := constructRayClusterForRayService(rayServiceInstance, activeRayCluster.Name, r.Scheme, nil)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -946,7 +946,7 @@ func (r *RayServiceReconciler) reconcileRayCluster(ctx context.Context, rayServi
 	if shouldUpdateCluster(rayServiceInstance, pendingRayCluster, false) {
 		// TODO(kevin85421): We should not reconstruct the cluster to update it. This will cause issues if autoscaler is enabled.
 		logger.Info("Updating the pending RayCluster instance", "clusterName", pendingRayCluster.Name)
-		goalCluster, err := constructRayClusterForRayService(rayServiceInstance, pendingRayCluster.Name, r.Scheme)
+		goalCluster, err := constructRayClusterForRayService(rayServiceInstance, pendingRayCluster.Name, r.Scheme, nil)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -1169,12 +1169,12 @@ func modifyRayCluster(ctx context.Context, currentCluster, goalCluster *rayv1.Ra
 	currentCluster.Annotations = goalCluster.Annotations
 }
 
-func (r *RayServiceReconciler) createRayClusterInstance(ctx context.Context, rayServiceInstance *rayv1.RayService) (*rayv1.RayCluster, error) {
+func (r *RayServiceReconciler) createRayClusterInstance(ctx context.Context, rayServiceInstance *rayv1.RayService, activeCluster *rayv1.RayCluster) (*rayv1.RayCluster, error) {
 	logger := ctrl.LoggerFrom(ctx)
 	rayClusterKey := common.RayServicePendingRayClusterNamespacedName(rayServiceInstance)
 	logger.Info("createRayClusterInstance", "clusterName", rayClusterKey.Name)
 
-	rayClusterInstance, err := constructRayClusterForRayService(rayServiceInstance, rayClusterKey.Name, r.Scheme)
+	rayClusterInstance, err := constructRayClusterForRayService(rayServiceInstance, rayClusterKey.Name, r.Scheme, activeCluster)
 	if err != nil {
 		return nil, err
 	}
@@ -1188,7 +1188,7 @@ func (r *RayServiceReconciler) createRayClusterInstance(ctx context.Context, ray
 	return rayClusterInstance, nil
 }
 
-func constructRayClusterForRayService(rayService *rayv1.RayService, rayClusterName string, scheme *runtime.Scheme) (*rayv1.RayCluster, error) {
+func constructRayClusterForRayService(rayService *rayv1.RayService, rayClusterName string, scheme *runtime.Scheme, activeCluster *rayv1.RayCluster) (*rayv1.RayCluster, error) {
 	var err error
 	rayClusterLabel := make(map[string]string)
 	for k, v := range rayService.Labels {
@@ -1218,6 +1218,13 @@ func constructRayClusterForRayService(rayService *rayv1.RayService, rayClusterNa
 		// that it autoscales based on the value of target_capacity from MinReplicas.
 		for i := range clusterSpec.WorkerGroupSpecs {
 			clusterSpec.WorkerGroupSpecs[i].Replicas = nil
+		}
+
+		// Snapshot the active cluster's available worker count at upgrade start for skipGateway
+		// capacity parity checks. Using the live count mid-upgrade would raise the bar if the
+		// active cluster autoscales under load and stall the promotion.
+		if utils.IsSkipGateway(&rayService.Spec) && activeCluster != nil {
+			rayClusterAnnotations[utils.ActiveWorkerSnapshotKey] = strconv.FormatInt(int64(activeCluster.Status.AvailableWorkerReplicas), 10)
 		}
 	}
 
@@ -1267,17 +1274,19 @@ func arePendingServeDeploymentsHealthy(apps map[string]rayv1.AppStatus) bool {
 //  2. Capacity parity: the pending cluster must have enough available worker replicas to handle
 //     the traffic level it is about to receive.
 //
-// Parity check formula: pending.availableWorkers >= ceil(pendingTargetCap/100 * active.availableWorkers)
+// Parity check formula: pending.availableWorkers >= ceil(pendingTargetCap/100 * snapshotWorkers)
+//
+// snapshotWorkers is read from the ActiveWorkerSnapshotKey annotation on the pending cluster,
+// which is stamped at pending cluster creation time. Using the snapshot instead of the live
+// active count prevents a mid-upgrade autoscale event on the active cluster from raising the
+// parity bar and stalling promotion. Falls back to the live active count when the annotation
+// is absent (e.g. pending clusters created before this feature).
 //
 // The parity check is skipped (falls back to health-only) when:
 //   - Either cluster object is nil (no information to compare).
-//   - pending.maxReplicas < active.availableWorkers: the upgrade intentionally reduces capacity
+//   - pending.maxReplicas < snapshotWorkers: the upgrade intentionally reduces capacity
 //     (e.g. cost reduction). Requiring parity would deadlock the upgrade since the pending
-//     cluster can never reach the active cluster's current replica count.
-//
-// TODO: Consider snapshotting the active cluster's replica count at upgrade start rather than
-// using the live count. Without a snapshot, a spike that scales the active cluster mid-upgrade
-// raises the parity bar and may stall the upgrade until load subsides.
+//     cluster can never reach the active cluster's original replica count.
 func isPendingClusterCapacityReady(
 	apps map[string]rayv1.AppStatus,
 	activeCluster, pendingCluster *rayv1.RayCluster,
@@ -1291,7 +1300,14 @@ func isPendingClusterCapacityReady(
 		return true
 	}
 
+	// Use the snapshotted active worker count if available; fall back to the live count.
 	activeAvailable := activeCluster.Status.AvailableWorkerReplicas
+	if snapshotStr, ok := pendingCluster.Annotations[utils.ActiveWorkerSnapshotKey]; ok {
+		if snapshotVal, err := strconv.ParseInt(snapshotStr, 10, 32); err == nil {
+			activeAvailable = int32(snapshotVal)
+		}
+	}
+
 	pendingAvailable := pendingCluster.Status.AvailableWorkerReplicas
 
 	// Sum maxReplicas across all worker groups on the pending cluster.
