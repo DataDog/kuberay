@@ -8593,13 +8593,11 @@ spec:
                         default: 100
                         format: int32
                         type: integer
+                      skipGateway:
+                        type: boolean
                       stepSizePercent:
                         format: int32
                         type: integer
-                    required:
-                    - gatewayClassName
-                    - intervalSeconds
-                    - stepSizePercent
                     type: object
                   type:
                     type: string

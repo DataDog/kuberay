@@ -26,6 +26,11 @@ const (
 	HashWithoutReplicasAndWorkersToDeleteKey = "ray.io/hash-without-replicas-and-workers-to-delete"
 	NumWorkerGroupsKey                       = "ray.io/num-worker-groups"
 	KubeRayVersion                           = "ray.io/kuberay-version"
+	// ActiveWorkerSnapshotKey records the active cluster's AvailableWorkerReplicas at the moment
+	// a pending cluster is created for a skipGateway incremental upgrade. isPendingClusterCapacityReady
+	// uses this snapshot instead of the live active count so that autoscaling on the active cluster
+	// during the upgrade does not raise the parity bar and stall promotion.
+	ActiveWorkerSnapshotKey = "ray.io/active-worker-snapshot"
 
 	// Labels for feature RayMultihostIndexing
 	//
@@ -371,6 +376,7 @@ const (
 	FailedToUpdateGateway           K8sEventType = "FailedToUpdateGateway"
 	FailedToCreateHTTPRoute         K8sEventType = "FailedToCreateHTTPRoute"
 	FailedToUpdateHTTPRoute         K8sEventType = "FailedToUpdateHTTPRoute"
+	UpgradeTimeout                  K8sEventType = "UpgradeTimeout"
 
 	// Generic Pod event list
 	DeletedPod                  K8sEventType = "DeletedPod"
