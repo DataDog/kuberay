@@ -1008,7 +1008,7 @@ func TestConstructRayClusterForRayService(t *testing.T) {
 			rayService.Name = "test-service"
 			rayService.Namespace = "test-namespace"
 			clusterName := "test-cluster"
-			rayCluster, err := constructRayClusterForRayService(&rayService, clusterName, scheme.Scheme)
+			rayCluster, err := constructRayClusterForRayService(&rayService, clusterName, scheme.Scheme, nil)
 			require.NoError(t, err)
 
 			// Check ObjectMeta of the RayCluster
@@ -3267,5 +3267,231 @@ func TestHandleSuspendObservedGeneration(t *testing.T) {
 		_, err := reconciler.handleSuspend(ctx, rayService)
 		require.NoError(t, err)
 		assert.Equal(t, int64(4), rayService.Status.ObservedGeneration)
+	})
+}
+
+func makeClusterWithWorkers(available int32, maxReplicas int32) *rayv1.RayCluster {
+	return &rayv1.RayCluster{
+		Spec: rayv1.RayClusterSpec{
+			WorkerGroupSpecs: []rayv1.WorkerGroupSpec{
+				{MaxReplicas: ptr.To(maxReplicas)},
+			},
+		},
+		Status: rayv1.RayClusterStatus{
+			AvailableWorkerReplicas: available,
+		},
+	}
+}
+
+func makeClusterWithWorkersAndSnapshot(available int32, maxReplicas int32, snapshot int32) *rayv1.RayCluster {
+	c := makeClusterWithWorkers(available, maxReplicas)
+	c.Annotations = map[string]string{
+		utils.ActiveWorkerSnapshotKey: strconv.FormatInt(int64(snapshot), 10),
+	}
+	return c
+}
+
+func makeHealthyApps() map[string]rayv1.AppStatus {
+	return map[string]rayv1.AppStatus{
+		"app": {
+			Status: rayv1.ApplicationStatusEnum.RUNNING,
+			Deployments: map[string]rayv1.ServeDeploymentStatus{
+				"dep": {Status: rayv1.DeploymentStatusEnum.HEALTHY},
+			},
+		},
+	}
+}
+
+func TestIsPendingClusterCapacityReady(t *testing.T) {
+	t.Run("returns false when no pending apps", func(t *testing.T) {
+		active := makeClusterWithWorkers(2, 2)
+		pending := makeClusterWithWorkers(1, 2)
+		assert.False(t, isPendingClusterCapacityReady(nil, active, pending, 20))
+	})
+
+	t.Run("returns true when both clusters nil", func(t *testing.T) {
+		assert.True(t, isPendingClusterCapacityReady(makeHealthyApps(), nil, nil, 0))
+	})
+
+	t.Run("returns true when pending maxReplicas < active available (capacity reduction)", func(t *testing.T) {
+		active := makeClusterWithWorkers(3, 3)
+		pending := makeClusterWithWorkers(1, 2) // maxReplicas=2 < activeAvailable=3
+		assert.True(t, isPendingClusterCapacityReady(makeHealthyApps(), active, pending, 80))
+	})
+
+	t.Run("returns false when pending workers insufficient for TC", func(t *testing.T) {
+		active := makeClusterWithWorkers(3, 5)
+		pending := makeClusterWithWorkers(1, 5) // needs ceil(40%*3)=2 workers, has 1
+		assert.False(t, isPendingClusterCapacityReady(makeHealthyApps(), active, pending, 40))
+	})
+
+	t.Run("returns true when pending workers sufficient for TC", func(t *testing.T) {
+		active := makeClusterWithWorkers(3, 5)
+		pending := makeClusterWithWorkers(2, 5) // needs ceil(40%*3)=2 workers, has 2
+		assert.True(t, isPendingClusterCapacityReady(makeHealthyApps(), active, pending, 40))
+	})
+
+	t.Run("TC=0 always passes worker check (no workers needed)", func(t *testing.T) {
+		active := makeClusterWithWorkers(3, 5)
+		pending := makeClusterWithWorkers(0, 5) // ceil(0%*3)=0 workers needed
+		assert.True(t, isPendingClusterCapacityReady(makeHealthyApps(), active, pending, 0))
+	})
+
+	t.Run("snapshot overrides live active count: active scaled up mid-upgrade but snapshot is used", func(t *testing.T) {
+		// Active cluster scaled from 3→5 during upgrade. Without snapshot, TC=100 would require
+		// pending to have 5 workers. With snapshot=3, pending only needs 3.
+		active := makeClusterWithWorkers(5, 5)                          // live count is now 5
+		pending := makeClusterWithWorkersAndSnapshot(3, 5, 3)           // snapshot=3 (original active count)
+		assert.True(t, isPendingClusterCapacityReady(makeHealthyApps(), active, pending, 100))
+	})
+
+	t.Run("snapshot overrides live active count: pending insufficient against snapshot", func(t *testing.T) {
+		// Snapshot=3, pending only has 2 workers — should still block.
+		active := makeClusterWithWorkers(5, 5)
+		pending := makeClusterWithWorkersAndSnapshot(2, 5, 3)
+		assert.False(t, isPendingClusterCapacityReady(makeHealthyApps(), active, pending, 100))
+	})
+
+	t.Run("falls back to live active count when snapshot annotation absent", func(t *testing.T) {
+		// No annotation: old behavior — uses live active count (3). Pending has 2, needs ceil(100%*3)=3.
+		active := makeClusterWithWorkers(3, 5)
+		pending := makeClusterWithWorkers(2, 5)
+		assert.False(t, isPendingClusterCapacityReady(makeHealthyApps(), active, pending, 100))
+	})
+}
+
+func TestReconcileStableServeService(t *testing.T) {
+	newScheme := runtime.NewScheme()
+	_ = rayv1.AddToScheme(newScheme)
+	_ = corev1.AddToScheme(newScheme)
+
+	namespace := "test-ns"
+	svcName := "test-rayservice"
+	stableSvcName := utils.GenerateServeServiceName(svcName)
+
+	makeReconciler := func(objects ...runtime.Object) *RayServiceReconciler {
+		fakeClient := clientFake.NewClientBuilder().WithScheme(newScheme).WithRuntimeObjects(objects...).Build()
+		return &RayServiceReconciler{
+			Client:   fakeClient,
+			Recorder: &events.FakeRecorder{},
+			Scheme:   newScheme,
+		}
+	}
+
+	makeRayService := func(serveService *corev1.Service) *rayv1.RayService {
+		return &rayv1.RayService{
+			ObjectMeta: metav1.ObjectMeta{Name: svcName, Namespace: namespace},
+			Spec: rayv1.RayServiceSpec{
+				UpgradeStrategy: &rayv1.RayServiceUpgradeStrategy{
+					Type: ptr.To(rayv1.RayServiceNewClusterWithIncrementalUpgrade),
+				},
+				ServeService: serveService,
+			},
+		}
+	}
+
+	makeCluster := func(name string) *rayv1.RayCluster {
+		return &rayv1.RayCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		}
+	}
+
+	ctx := context.Background()
+
+	t.Run("no-op when stable service absent and spec.serveService nil", func(t *testing.T) {
+		r := makeReconciler()
+		rs := makeRayService(nil)
+		err := r.reconcileStableServeService(ctx, rs, makeCluster("cluster-a"))
+		require.NoError(t, err)
+
+		svcList := &corev1.ServiceList{}
+		require.NoError(t, r.Client.List(ctx, svcList, client.InNamespace(namespace)))
+		assert.Empty(t, svcList.Items)
+	})
+
+	t.Run("creates stable service when absent and spec.serveService provided", func(t *testing.T) {
+		customServeService := &corev1.Service{
+			Spec: corev1.ServiceSpec{
+				Selector: map[string]string{"ray.io/node-type": "worker"},
+				Ports:    []corev1.ServicePort{{Name: "serve", Port: 8000}},
+			},
+		}
+		r := makeReconciler()
+		rs := makeRayService(customServeService)
+		err := r.reconcileStableServeService(ctx, rs, makeCluster("cluster-a"))
+		require.NoError(t, err)
+
+		svc := &corev1.Service{}
+		require.NoError(t, r.Client.Get(ctx, client.ObjectKey{Name: stableSvcName, Namespace: namespace}, svc))
+		assert.Equal(t, "cluster-a", svc.Spec.Selector[utils.RayClusterLabelKey])
+		assert.Equal(t, utils.EnableRayClusterServingServiceTrue, svc.Spec.Selector[utils.RayClusterServingServiceLabelKey])
+		assert.Equal(t, "worker", svc.Spec.Selector["ray.io/node-type"], "custom selector should be preserved")
+	})
+
+	t.Run("updates stale selector to new active cluster — with spec.serveService", func(t *testing.T) {
+		staleSvc := &corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{Name: stableSvcName, Namespace: namespace},
+			Spec: corev1.ServiceSpec{
+				Selector: map[string]string{
+					utils.RayClusterLabelKey:               "old-cluster",
+					utils.RayClusterServingServiceLabelKey: utils.EnableRayClusterServingServiceTrue,
+				},
+			},
+		}
+		customServeService := &corev1.Service{
+			Spec: corev1.ServiceSpec{
+				Selector: map[string]string{"ray.io/node-type": "worker"},
+			},
+		}
+		r := makeReconciler(staleSvc)
+		rs := makeRayService(customServeService)
+		err := r.reconcileStableServeService(ctx, rs, makeCluster("new-cluster"))
+		require.NoError(t, err)
+
+		updated := &corev1.Service{}
+		require.NoError(t, r.Client.Get(ctx, client.ObjectKey{Name: stableSvcName, Namespace: namespace}, updated))
+		assert.Equal(t, "new-cluster", updated.Spec.Selector[utils.RayClusterLabelKey])
+		assert.Equal(t, "worker", updated.Spec.Selector["ray.io/node-type"], "custom selector should be preserved after update")
+	})
+
+	t.Run("updates stale selector to new active cluster — without spec.serveService (gateway path)", func(t *testing.T) {
+		// Stable service exists (created before incremental upgrade was enabled) but spec.serveService is now nil.
+		staleSvc := &corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{Name: stableSvcName, Namespace: namespace},
+			Spec: corev1.ServiceSpec{
+				Selector: map[string]string{
+					utils.RayClusterLabelKey:               "old-cluster",
+					utils.RayClusterServingServiceLabelKey: utils.EnableRayClusterServingServiceTrue,
+				},
+			},
+		}
+		r := makeReconciler(staleSvc)
+		rs := makeRayService(nil)
+		err := r.reconcileStableServeService(ctx, rs, makeCluster("new-cluster"))
+		require.NoError(t, err)
+
+		updated := &corev1.Service{}
+		require.NoError(t, r.Client.Get(ctx, client.ObjectKey{Name: stableSvcName, Namespace: namespace}, updated))
+		assert.Equal(t, "new-cluster", updated.Spec.Selector[utils.RayClusterLabelKey], "gateway-path stable service selector must follow active cluster")
+	})
+
+	t.Run("idempotent when selector already points at active cluster", func(t *testing.T) {
+		currentSvc := &corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{Name: stableSvcName, Namespace: namespace, ResourceVersion: "42"},
+			Spec: corev1.ServiceSpec{
+				Selector: map[string]string{
+					utils.RayClusterLabelKey:               "current-cluster",
+					utils.RayClusterServingServiceLabelKey: utils.EnableRayClusterServingServiceTrue,
+				},
+			},
+		}
+		r := makeReconciler(currentSvc)
+		rs := makeRayService(nil)
+		err := r.reconcileStableServeService(ctx, rs, makeCluster("current-cluster"))
+		require.NoError(t, err)
+
+		unchanged := &corev1.Service{}
+		require.NoError(t, r.Client.Get(ctx, client.ObjectKey{Name: stableSvcName, Namespace: namespace}, unchanged))
+		assert.Equal(t, "42", unchanged.ResourceVersion, "service should not be updated when selector is already correct")
 	})
 }

@@ -111,9 +111,11 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `maxSurgePercent` _integer_ | The capacity of serve requests the upgraded cluster should scale to handle each interval.<br />Defaults to 100%. | 100 |  |
-| `stepSizePercent` _integer_ | The percentage of traffic to switch to the upgraded RayCluster at a set interval after scaling by MaxSurgePercent.<br />StepSizePercent must be less than or equal to MaxSurgePercent. |  |  |
-| `intervalSeconds` _integer_ | The interval in seconds between transferring StepSize traffic from the old to new RayCluster. |  |  |
-| `gatewayClassName` _string_ | The name of the Gateway Class installed by the Kubernetes Cluster admin. |  |  |
+| `stepSizePercent` _integer_ | The percentage of traffic to switch to the upgraded RayCluster at a set interval after scaling by MaxSurgePercent.<br />StepSizePercent must be less than or equal to MaxSurgePercent.<br />Not used when SkipGateway is true. |  |  |
+| `intervalSeconds` _integer_ | The interval in seconds between transferring StepSize traffic from the old to new RayCluster.<br />Not used when SkipGateway is true. |  |  |
+| `gatewayClassName` _string_ | The name of the Gateway Class installed by the Kubernetes Cluster admin.<br />Required when SkipGateway is false or unset. |  |  |
+| `skipGateway` _boolean_ | SkipGateway disables Gateway and HTTPRoute reconciliation and readiness checks during<br />a NewClusterWithIncrementalUpgrade. When true, traffic splitting must be managed by a<br />client-side load balancer that reads targetCapacity from the RayService status.<br />target_capacity advances to the next step only after pending cluster Serve deployments<br />report HEALTHY, ensuring each autoscaling round completes before the next begins.<br />GatewayClassName, StepSizePercent, and IntervalSeconds are not required when SkipGateway is true. |  |  |
+| `upgradeTimeoutSeconds` _integer_ | UpgradeTimeoutSeconds is the maximum duration in seconds the upgrade is allowed to<br />remain in progress. If the pending cluster does not complete the upgrade within this<br />window, the upgrade is aborted: the pending RayCluster is deleted and a Kubernetes<br />event is emitted. Defaults to 0 (no timeout). |  |  |
 
 
 #### CollectorOptions

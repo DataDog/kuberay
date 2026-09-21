@@ -12,11 +12,26 @@ type ClusterUpgradeOptionsApplyConfiguration struct {
 	MaxSurgePercent *int32 `json:"maxSurgePercent,omitempty"`
 	// The percentage of traffic to switch to the upgraded RayCluster at a set interval after scaling by MaxSurgePercent.
 	// StepSizePercent must be less than or equal to MaxSurgePercent.
+	// Not used when SkipGateway is true.
 	StepSizePercent *int32 `json:"stepSizePercent,omitempty"`
 	// The interval in seconds between transferring StepSize traffic from the old to new RayCluster.
+	// Not used when SkipGateway is true.
 	IntervalSeconds *int32 `json:"intervalSeconds,omitempty"`
 	// The name of the Gateway Class installed by the Kubernetes Cluster admin.
+	// Required when SkipGateway is false or unset.
 	GatewayClassName *string `json:"gatewayClassName,omitempty"`
+	// SkipGateway disables Gateway and HTTPRoute reconciliation and readiness checks during
+	// a NewClusterWithIncrementalUpgrade. When true, traffic splitting must be managed by a
+	// client-side load balancer that reads targetCapacity from the RayService status.
+	// target_capacity advances to the next step only after pending cluster Serve deployments
+	// report HEALTHY, ensuring each autoscaling round completes before the next begins.
+	// GatewayClassName, StepSizePercent, and IntervalSeconds are not required when SkipGateway is true.
+	SkipGateway *bool `json:"skipGateway,omitempty"`
+	// UpgradeTimeoutSeconds is the maximum duration in seconds the upgrade is allowed to
+	// remain in progress. If the pending cluster does not complete the upgrade within this
+	// window, the upgrade is aborted: the pending RayCluster is deleted and a Kubernetes
+	// event is emitted. Defaults to 0 (no timeout).
+	UpgradeTimeoutSeconds *int32 `json:"upgradeTimeoutSeconds,omitempty"`
 }
 
 // ClusterUpgradeOptionsApplyConfiguration constructs a declarative configuration of the ClusterUpgradeOptions type for use with
@@ -54,5 +69,21 @@ func (b *ClusterUpgradeOptionsApplyConfiguration) WithIntervalSeconds(value int3
 // If called multiple times, the GatewayClassName field is set to the value of the last call.
 func (b *ClusterUpgradeOptionsApplyConfiguration) WithGatewayClassName(value string) *ClusterUpgradeOptionsApplyConfiguration {
 	b.GatewayClassName = &value
+	return b
+}
+
+// WithSkipGateway sets the SkipGateway field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the SkipGateway field is set to the value of the last call.
+func (b *ClusterUpgradeOptionsApplyConfiguration) WithSkipGateway(value bool) *ClusterUpgradeOptionsApplyConfiguration {
+	b.SkipGateway = &value
+	return b
+}
+
+// WithUpgradeTimeoutSeconds sets the UpgradeTimeoutSeconds field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the UpgradeTimeoutSeconds field is set to the value of the last call.
+func (b *ClusterUpgradeOptionsApplyConfiguration) WithUpgradeTimeoutSeconds(value int32) *ClusterUpgradeOptionsApplyConfiguration {
+	b.UpgradeTimeoutSeconds = &value
 	return b
 }

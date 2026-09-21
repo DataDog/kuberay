@@ -27,6 +27,11 @@ const (
 	UpgradeStrategyRecreateHashKey           = "ray.io/upgrade-strategy-recreate-hash"
 	NumWorkerGroupsKey                       = "ray.io/num-worker-groups"
 	KubeRayVersion                           = "ray.io/kuberay-version"
+	// ActiveWorkerSnapshotKey records the active cluster's AvailableWorkerReplicas at the moment
+	// a pending cluster is created for a skipGateway incremental upgrade. isPendingClusterCapacityReady
+	// uses this snapshot instead of the live active count so that autoscaling on the active cluster
+	// during the upgrade does not raise the parity bar and stall promotion.
+	ActiveWorkerSnapshotKey = "ray.io/active-worker-snapshot"
 	RayCronJobNameLabelKey                   = "ray.io/cronjob-name"
 	RayCronJobTimestampAnnotationKey         = "ray.io/cronjob-scheduled-timestamp"
 	RayJobSubmissionModeLabelKey             = "ray.io/job-submission-mode"
@@ -498,6 +503,7 @@ const (
 	DeletedGateway                  K8sEventType = "DeletedGateway"
 	DeletedHTTPRoute                K8sEventType = "DeletedHTTPRoute"
 	DeletedService                  K8sEventType = "DeletedService"
+	UpgradeTimeout                  K8sEventType = "UpgradeTimeout"
 
 	// Generic Pod event list
 	DeletedPod                  K8sEventType = "DeletedPod"
