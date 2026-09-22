@@ -61,6 +61,7 @@ var DeploymentStatusEnum = struct {
 }
 
 // These options are currently only supported for the IncrementalUpgrade type.
+// +kubebuilder:validation:XValidation:rule="!has(self.skipGateway) || self.skipGateway == true || (self.gatewayClassName != '' && has(self.intervalSeconds) && has(self.stepSizePercent))",message="gatewayClassName, intervalSeconds, and stepSizePercent are required when skipGateway is false"
 type ClusterUpgradeOptions struct {
 	// The capacity of serve requests the upgraded cluster should scale to handle each interval.
 	// Defaults to 100%.
@@ -68,11 +69,11 @@ type ClusterUpgradeOptions struct {
 	MaxSurgePercent *int32 `json:"maxSurgePercent,omitempty"`
 	// The percentage of traffic to switch to the upgraded RayCluster at a set interval after scaling by MaxSurgePercent.
 	// Not used when SkipGateway is true.
-	// +optional
+	// +kubebuilder:default:=10
 	StepSizePercent *int32 `json:"stepSizePercent,omitempty"`
 	// The interval in seconds between transferring StepSize traffic from the old to new RayCluster.
 	// Not used when SkipGateway is true.
-	// +optional
+	// +kubebuilder:default:=60
 	IntervalSeconds *int32 `json:"intervalSeconds,omitempty"`
 	// The name of the Gateway Class installed by the Kubernetes Cluster admin.
 	// Required when SkipGateway is false or unset.
@@ -91,6 +92,7 @@ type ClusterUpgradeOptions struct {
 	// window, the upgrade is aborted: the pending RayCluster is deleted and a Kubernetes
 	// event is emitted. Defaults to 0 (no timeout).
 	// +optional
+	// +kubebuilder:validation:Minimum=0
 	UpgradeTimeoutSeconds *int32 `json:"upgradeTimeoutSeconds,omitempty"`
 }
 
