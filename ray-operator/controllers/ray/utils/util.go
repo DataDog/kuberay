@@ -3,6 +3,8 @@ package utils
 import (
 	"context"
 	"crypto/sha1" //nolint:gosec // We are not using this for security purposes
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base32"
 	"fmt"
 	"math"
@@ -71,6 +73,36 @@ func GetClusterDomainName() string {
 
 	// Return default domain name.
 	return DefaultDomainName
+}
+
+// BuildDashboardURL constructs the dashboard URL for a given head service name and namespace.
+// If domainSuffix is non-empty, it constructs a URL using the custom domain with the format:
+//
+//	<scheme>://<headSvcName>.<namespace>.<domainSuffix>[:<port>]
+//
+// domainSuffix should include any Kubernetes subdomain prefix, e.g.:
+//
+//	"svc.example.com"
+//	→ raycluster-head-svc.my-namespace.svc.example.com:8266
+//
+// useTLS selects the scheme (https vs http) and must be kept in sync with whatever
+// scheme newDashboardHTTPClient decided to use for this same RayCluster, or the client
+// and the URL it dials will disagree.
+//
+// If domainSuffix is empty it falls back to the plain HTTP URL built from fallbackURL
+// (backwards-compatible default behaviour).
+func BuildDashboardURL(headSvcName, namespace, domainSuffix, port, fallbackURL string, useTLS bool) string {
+	if domainSuffix == "" {
+		return "http://" + fallbackURL
+	}
+	scheme := "http"
+	if useTLS {
+		scheme = "https"
+	}
+	if port != "" {
+		return fmt.Sprintf("%s://%s.%s.%s:%s", scheme, headSvcName, namespace, domainSuffix, port)
+	}
+	return fmt.Sprintf("%s://%s.%s.%s", scheme, headSvcName, namespace, domainSuffix)
 }
 
 // IsCreated returns true if pod has been created and is maintained by the API server
@@ -943,6 +975,66 @@ func FetchHeadServiceURL(ctx context.Context, cli client.Client, rayCluster *ray
 	return headServiceURL, nil
 }
 
+// newDashboardHTTPClient builds an *http.Client for dashboard connections.
+//
+// TEMPORARY/TESTING GATE: TLS is only attempted when serverName (the RayCluster's
+// HeadGroupSpec.DashboardTLSServerName, qualified) is non-empty. This lets an operator
+// build with the KUBERAY_DASHBOARD_TLS_* env vars set cluster-wide be deployed onto a
+// shared cluster for testing without forcing TLS onto every other tenant's RayCluster —
+// only RayClusters that explicitly opt in via DashboardTLSServerName are affected.
+// TODO: revisit this gate once the fabric-mTLS rollout is no longer opt-in per-cluster.
+//
+// When TLS is attempted, the KUBERAY_DASHBOARD_TLS_* environment variables still supply
+// the actual credentials (CA cert for verification, client cert+key for mTLS).
+//
+// serverName overrides the name used to verify the server's TLS certificate. It is
+// independent of the address actually dialed: the operator always dials the real head
+// service for the specific RayCluster generation being checked, but the certificate
+// presented there may carry a different, stable SAN.
+func newDashboardHTTPClient(serverName string) (*http.Client, error) {
+	if serverName == "" {
+		return &http.Client{Timeout: 2 * time.Second}, nil
+	}
+
+	caFile := os.Getenv(KUBERAY_DASHBOARD_TLS_CA_CERT)
+	certFile := os.Getenv(KUBERAY_DASHBOARD_TLS_CLIENT_CERT)
+	keyFile := os.Getenv(KUBERAY_DASHBOARD_TLS_CLIENT_KEY)
+
+	if (certFile == "") != (keyFile == "") {
+		return nil, fmt.Errorf("%s and %s must both be set for mTLS", KUBERAY_DASHBOARD_TLS_CLIENT_CERT, KUBERAY_DASHBOARD_TLS_CLIENT_KEY)
+	}
+
+	tlsCfg := &tls.Config{}
+	if serverName != "" {
+		tlsCfg.ServerName = serverName
+	}
+
+	if caFile != "" {
+		caPEM, err := os.ReadFile(caFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read dashboard CA cert %q: %w", caFile, err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(caPEM) {
+			return nil, fmt.Errorf("failed to parse dashboard CA cert %q", caFile)
+		}
+		tlsCfg.RootCAs = pool
+	}
+
+	if certFile != "" {
+		cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load dashboard client cert/key (%q, %q): %w", certFile, keyFile, err)
+		}
+		tlsCfg.Certificates = []tls.Certificate{cert}
+	}
+
+	return &http.Client{
+		Timeout:   2 * time.Second,
+		Transport: &http.Transport{TLSClientConfig: tlsCfg},
+	}, nil
+}
+
 func GetRayDashboardClientFunc(mgr manager.Manager, useKubernetesProxy bool) func(rayCluster *rayv1.RayCluster, url string) (dashboardclient.RayDashboardClientInterface, error) {
 	return func(rayCluster *rayv1.RayCluster, url string) (dashboardclient.RayDashboardClientInterface, error) {
 		dashboardClient := &dashboardclient.RayDashboardClient{}
@@ -969,14 +1061,9 @@ func GetRayDashboardClientFunc(mgr manager.Manager, useKubernetesProxy bool) fun
 		}
 
 		if useKubernetesProxy {
-			var err error
-			headSvcName := rayCluster.Status.Head.ServiceName
-			if headSvcName == "" {
-				headSvcName, err = GenerateHeadServiceName(RayClusterCRD, rayCluster.Spec, rayCluster.Name)
-				if err != nil {
-					err = fmt.Errorf("failed to construct Ray dashboard client: %w", err)
-					return nil, err
-				}
+			headSvcName, err := GenerateHeadServiceName(RayClusterCRD, rayCluster.Spec, rayCluster.Name)
+			if err != nil {
+				return nil, fmt.Errorf("failed to construct Ray dashboard client: %w", err)
 			}
 
 			dashboardClient.InitClient(
@@ -989,13 +1076,57 @@ func GetRayDashboardClientFunc(mgr manager.Manager, useKubernetesProxy bool) fun
 			return dashboardClient, nil
 		}
 
-		dashboardClient.InitClient(
-			&http.Client{
-				Timeout: 2 * time.Second,
-			},
-			"http://"+url,
-			authToken,
+		headSvcName, err := GenerateHeadServiceName(RayClusterCRD, rayCluster.Spec, rayCluster.Name)
+		if err != nil {
+			return nil, fmt.Errorf("failed to construct Ray dashboard client: %w", err)
+		}
+
+		domainSuffix := os.Getenv(KUBERAY_DASHBOARD_DOMAIN_SUFFIX)
+		port := os.Getenv(KUBERAY_DASHBOARD_PORT)
+
+		// Qualify the override the same way the dial address itself is qualified below
+		// (<name>.<namespace>.<domainSuffix>), so a bare identity shared across several
+		// RayCluster generations/namespaces still resolves to the namespace-specific SAN
+		// on the certificate.
+		serverName := rayCluster.Spec.HeadGroupSpec.DashboardTLSServerName
+		if serverName != "" && domainSuffix != "" {
+			serverName = fmt.Sprintf("%s.%s.%s", serverName, rayCluster.Namespace, domainSuffix)
+		}
+
+		httpClient, err := newDashboardHTTPClient(serverName)
+		if err != nil {
+			return nil, fmt.Errorf("failed to construct Ray dashboard client: %w", err)
+		}
+
+		// Always dial the real head service for this specific RayCluster generation. TLS
+		// verification, when needed, is handled separately via DashboardTLSServerName above —
+		// it never changes which address is dialed. useTLS mirrors the same gate as
+		// newDashboardHTTPClient so the URL scheme and client never disagree.
+		//
+		// TEMPORARY/TESTING GATE (cont'd): KUBERAY_DASHBOARD_DOMAIN_SUFFIX/PORT route through
+		// a mesh-intercepted port that only understands registered mTLS identities. A
+		// RayCluster that hasn't opted in via DashboardTLSServerName has no such identity, so
+		// it must never be routed onto that FQDN/port — fall back to the plain, directly
+		// dialable fallbackURL (passed in as `url`) instead. Without this, setting the env
+		// vars operator-wide would still redirect every other tenant's dashboard traffic onto
+		// the mesh port and break them, even though their TLS client stays disabled.
+		useTLS := serverName != ""
+		effectiveDomainSuffix := domainSuffix
+		if !useTLS {
+			effectiveDomainSuffix = ""
+		}
+		dashURL := BuildDashboardURL(headSvcName, rayCluster.Namespace, effectiveDomainSuffix, port, url, useTLS)
+
+		ctrl.Log.WithName("controllers").WithName("Dashboard").Info(
+			"Constructed Ray dashboard client",
+			"RayCluster", rayCluster.Name,
+			"namespace", rayCluster.Namespace,
+			"dashboardURL", dashURL,
+			"useTLS", useTLS,
+			"dashboardTLSServerName", serverName,
 		)
+
+		dashboardClient.InitClient(httpClient, dashURL, authToken)
 
 		return dashboardClient, nil
 	}

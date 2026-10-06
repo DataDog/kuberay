@@ -2,9 +2,18 @@ package utils
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"errors"
+	"math/big"
+	"net/http"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1791,4 +1800,239 @@ func TestGetWeightsFromHTTPRoute(t *testing.T) {
 			assert.Equal(t, tt.expectedPending, pending, "Pending weight mismatch")
 		})
 	}
+}
+
+func TestBuildDashboardURL(t *testing.T) {
+	tests := []struct {
+		name         string
+		headSvcName  string
+		namespace    string
+		domainSuffix string
+		port         string
+		fallbackURL  string
+		useTLS       bool
+		want         string
+	}{
+		{
+			name:         "no domain suffix — uses HTTP fallback URL (backwards compatible)",
+			headSvcName:  "raycluster-head-svc",
+			namespace:    "my-namespace",
+			domainSuffix: "",
+			port:         "",
+			fallbackURL:  "10.0.0.1:8265",
+			useTLS:       true,
+			want:         "http://10.0.0.1:8265",
+		},
+		{
+			name:         "no domain suffix — port is ignored",
+			headSvcName:  "raycluster-head-svc",
+			namespace:    "my-namespace",
+			domainSuffix: "",
+			port:         "8266",
+			fallbackURL:  "10.0.0.1:8265",
+			useTLS:       true,
+			want:         "http://10.0.0.1:8265",
+		},
+		{
+			name:         "suffix includes svc. and useTLS — constructs HTTPS URL with namespace and port",
+			headSvcName:  "raycluster-head-svc",
+			namespace:    "my-namespace",
+			domainSuffix: "svc.example.com",
+			port:         "8266",
+			fallbackURL:  "10.0.0.1:8265",
+			useTLS:       true,
+			want:         "https://raycluster-head-svc.my-namespace.svc.example.com:8266",
+		},
+		{
+			name:         "suffix includes svc. and useTLS — constructs HTTPS URL with namespace, no port",
+			headSvcName:  "raycluster-head-svc",
+			namespace:    "my-namespace",
+			domainSuffix: "svc.example.com",
+			port:         "",
+			fallbackURL:  "10.0.0.1:8265",
+			useTLS:       true,
+			want:         "https://raycluster-head-svc.my-namespace.svc.example.com",
+		},
+		{
+			name:         "suffix includes svc. but useTLS is false — constructs HTTP URL",
+			headSvcName:  "raycluster-head-svc",
+			namespace:    "my-namespace",
+			domainSuffix: "svc.example.com",
+			port:         "8266",
+			fallbackURL:  "10.0.0.1:8265",
+			useTLS:       false,
+			want:         "http://raycluster-head-svc.my-namespace.svc.example.com:8266",
+		},
+		{
+			name:         "custom head service name with dashes in different namespace",
+			headSvcName:  "my-cluster-kuberay-head-svc",
+			namespace:    "ml-team",
+			domainSuffix: "svc.prod.example.com",
+			port:         "443",
+			fallbackURL:  "10.0.0.2:8265",
+			useTLS:       true,
+			want:         "https://my-cluster-kuberay-head-svc.ml-team.svc.prod.example.com:443",
+		},
+		{
+			name:         "non-svc subdomain prefix",
+			headSvcName:  "my-ray-cluster-head-svc",
+			namespace:    "my-namespace",
+			domainSuffix: "mesh.example.com",
+			port:         "",
+			fallbackURL:  "10.0.0.1:8265",
+			useTLS:       true,
+			want:         "https://my-ray-cluster-head-svc.my-namespace.mesh.example.com",
+		},
+		{
+			name:         "empty fallback URL when no domain suffix",
+			headSvcName:  "raycluster-head-svc",
+			namespace:    "default",
+			domainSuffix: "",
+			port:         "",
+			fallbackURL:  "",
+			useTLS:       true,
+			want:         "http://",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := BuildDashboardURL(tt.headSvcName, tt.namespace, tt.domainSuffix, tt.port, tt.fallbackURL, tt.useTLS)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestNewDashboardHTTPClient(t *testing.T) {
+	// Generate a minimal self-signed CA cert for tests that need a real PEM file.
+	caCertPEM := generateSelfSignedCACert(t)
+	caFile := writeTempPEM(t, caCertPEM)
+
+	tests := []struct {
+		name       string
+		envVars    map[string]string
+		serverName string
+		wantTLS    bool
+		wantErr    string
+	}{
+		{
+			name:    "no env vars, no server name — returns plain HTTP client",
+			envVars: map[string]string{},
+			wantTLS: false,
+		},
+		{
+			name: "env vars set but server name empty — TEMPORARY gate keeps plain HTTP",
+			envVars: map[string]string{
+				KUBERAY_DASHBOARD_TLS_CA_CERT: caFile,
+			},
+			wantTLS: false,
+		},
+		{
+			name:       "server name set but no env vars — TLS with system CA pool, no client cert",
+			serverName: "my-rayservice-head-svc",
+			wantTLS:    true,
+		},
+		{
+			name: "server name set with CA cert — one-way TLS, custom RootCAs set",
+			envVars: map[string]string{
+				KUBERAY_DASHBOARD_TLS_CA_CERT: caFile,
+			},
+			serverName: "my-rayservice-head-svc",
+			wantTLS:    true,
+		},
+		{
+			name: "server name set, CA cert file missing — error",
+			envVars: map[string]string{
+				KUBERAY_DASHBOARD_TLS_CA_CERT: "/nonexistent/ca.pem",
+			},
+			serverName: "my-rayservice-head-svc",
+			wantErr:    "failed to read dashboard CA cert",
+		},
+		{
+			name: "server name set, cert without key — error",
+			envVars: map[string]string{
+				KUBERAY_DASHBOARD_TLS_CLIENT_CERT: caFile,
+			},
+			serverName: "my-rayservice-head-svc",
+			wantErr:    KUBERAY_DASHBOARD_TLS_CLIENT_CERT,
+		},
+		{
+			name: "server name set, key without cert — error",
+			envVars: map[string]string{
+				KUBERAY_DASHBOARD_TLS_CLIENT_KEY: caFile,
+			},
+			serverName: "my-rayservice-head-svc",
+			wantErr:    KUBERAY_DASHBOARD_TLS_CLIENT_CERT,
+		},
+		{
+			name: "CA cert with server name override — ServerName set independently of dial address",
+			envVars: map[string]string{
+				KUBERAY_DASHBOARD_TLS_CA_CERT: caFile,
+			},
+			serverName: "my-rayservice-head-svc",
+			wantTLS:    true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for k, v := range tt.envVars {
+				t.Setenv(k, v)
+			}
+
+			client, err := newDashboardHTTPClient(tt.serverName)
+
+			if tt.wantErr != "" {
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+				assert.Nil(t, client)
+				return
+			}
+
+			require.NoError(t, err)
+			require.NotNil(t, client)
+
+			transport, hasTLSTransport := client.Transport.(*http.Transport)
+			if tt.wantTLS {
+				assert.True(t, hasTLSTransport, "expected TLS transport")
+				assert.NotNil(t, transport.TLSClientConfig)
+				if tt.envVars[KUBERAY_DASHBOARD_TLS_CA_CERT] != "" {
+					assert.NotNil(t, transport.TLSClientConfig.RootCAs)
+				}
+				assert.Equal(t, tt.serverName, transport.TLSClientConfig.ServerName)
+			} else {
+				assert.False(t, hasTLSTransport, "expected plain client with no custom transport")
+			}
+		})
+	}
+}
+
+// generateSelfSignedCACert returns a PEM-encoded self-signed CA cert for testing.
+func generateSelfSignedCACert(t *testing.T) []byte {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "test-ca"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	require.NoError(t, err)
+
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+}
+
+func writeTempPEM(t *testing.T, data []byte) string {
+	t.Helper()
+	f, err := os.CreateTemp(t.TempDir(), "*.pem")
+	require.NoError(t, err)
+	_, err = f.Write(data)
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+	return f.Name()
 }

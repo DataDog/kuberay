@@ -149,6 +149,33 @@ operatorCommand: /manager
 # Using this option to configure kuberay-operator to comunitcate to Ray head pods by proxying through the Kubernetes API Server.
 # useKubernetesProxy: true
 
+# Dashboard URL and TLS configuration via environment variables.
+# Set these under env: to configure HTTPS dashboard connections.
+#
+# KUBERAY_DASHBOARD_DOMAIN_SUFFIX  – domain suffix for HTTPS dashboard URLs.
+#   When set, the operator builds: https://<head-svc>.<namespace>.<suffix>[:<port>]
+#   The suffix must include any Kubernetes subdomain prefix (e.g. "svc.cluster.local").
+#   When unset (default), the operator uses the original plain-HTTP behaviour.
+# KUBERAY_DASHBOARD_PORT           – port appended to the URL when DOMAIN_SUFFIX is set.
+# KUBERAY_DASHBOARD_TLS_CA_CERT     – path to PEM CA cert for server cert verification.
+# KUBERAY_DASHBOARD_TLS_CLIENT_CERT – path to PEM client cert for mTLS.
+# KUBERAY_DASHBOARD_TLS_CLIENT_KEY  – path to PEM client key for mTLS.
+# KUBERAY_DASHBOARD_TLS_SERVER_NAME – override the server name used for TLS cert verification.
+#   Set when the server cert is issued for a different name than the host in the dashboard URL.
+#
+# Example:
+# env:
+#   - name: KUBERAY_DASHBOARD_DOMAIN_SUFFIX
+#     value: "svc.$(CLUSTER_DOMAIN)"
+#   - name: KUBERAY_DASHBOARD_PORT
+#     value: "8266"
+#   - name: KUBERAY_DASHBOARD_TLS_CA_CERT
+#     value: /etc/emissary/certs/client/ca.pem
+#   - name: KUBERAY_DASHBOARD_TLS_CLIENT_CERT
+#     value: /etc/emissary/certs/client/cert.pem
+#   - name: KUBERAY_DASHBOARD_TLS_CLIENT_KEY
+#     value: /etc/emissary/certs/client/key.pem
+
 # -- If leaderElectionEnabled is set to true, the KubeRay operator will use leader election for high availability.
 leaderElectionEnabled: true
 

@@ -86,6 +86,12 @@ func ValidateRayClusterSpec(spec *rayv1.RayClusterSpec, annotations map[string]s
 		return fmt.Errorf("headGroupSpec should have at least one container")
 	}
 
+	if name := spec.HeadGroupSpec.DashboardTLSServerName; name != "" {
+		if errs := validation.IsDNS1123Label(name); len(errs) > 0 {
+			return fmt.Errorf("headGroupSpec.dashboardTlsServerName %q is invalid: %s", name, strings.Join(errs, "; "))
+		}
+	}
+
 	if err := validateRayGroupResources("Head", spec.HeadGroupSpec.RayStartParams, spec.HeadGroupSpec.Resources); err != nil {
 		return err
 	}
