@@ -2000,6 +2000,11 @@ func TestNewDashboardHTTPClient(t *testing.T) {
 					assert.NotNil(t, transport.TLSClientConfig.RootCAs)
 				}
 				assert.Equal(t, tt.serverName, transport.TLSClientConfig.ServerName)
+				// Each check builds its own transport, so idle connections left in the
+				// pool are never reused — they must be bounded rather than left to the
+				// zero value, which means "no limit".
+				assert.Equal(t, dashboardIdleConnTimeout, transport.IdleConnTimeout)
+				assert.Positive(t, transport.IdleConnTimeout)
 			} else {
 				assert.False(t, hasTLSTransport, "expected plain client with no custom transport")
 			}
