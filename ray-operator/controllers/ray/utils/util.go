@@ -43,6 +43,18 @@ const (
 	ContainersNotReady  = "ContainersNotReady"
 )
 
+// dashboardIdleConnTimeout bounds how long an idle keep-alive connection is kept in a
+// dashboard transport's pool before being closed.
+//
+// newDashboardHTTPClient builds a fresh *http.Transport per call, and each call serves a
+// single dashboard check, so a transport's pooled connection is never reused — without an
+// idle timeout it would sit open until the peer or a TCP timeout tore it down, and the
+// operator would accumulate one such connection per check. Go's own DefaultTransport uses
+// 90s, which suits a long-lived shared transport; these are short-lived and single-use, so
+// a much tighter bound is appropriate. It is still kept comfortably above the client's 2s
+// request timeout so it never races an in-flight request.
+const dashboardIdleConnTimeout = 10 * time.Second
+
 // TODO (kevin85421): Define CRDType here rather than constant.go to avoid circular dependency.
 type CRDType string
 
@@ -991,6 +1003,10 @@ func FetchHeadServiceURL(ctx context.Context, cli client.Client, rayCluster *ray
 // independent of the address actually dialed: the operator always dials the real head
 // service for the specific RayCluster generation being checked, but the certificate
 // presented there may carry a different, stable SAN.
+//
+// Each call returns a client with its own *http.Transport, so a given transport's
+// connection pool is never reused by a later dashboard check. dashboardIdleConnTimeout
+// bounds how long those orphaned keep-alive connections survive; see its declaration.
 func newDashboardHTTPClient(serverName string) (*http.Client, error) {
 	if serverName == "" {
 		return &http.Client{Timeout: 2 * time.Second}, nil
@@ -1030,8 +1046,11 @@ func newDashboardHTTPClient(serverName string) (*http.Client, error) {
 	}
 
 	return &http.Client{
-		Timeout:   2 * time.Second,
-		Transport: &http.Transport{TLSClientConfig: tlsCfg},
+		Timeout: 2 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: tlsCfg,
+			IdleConnTimeout: dashboardIdleConnTimeout,
+		},
 	}, nil
 }
 
