@@ -1301,10 +1301,16 @@ func isPendingClusterCapacityReady(
 	}
 
 	// Use the snapshotted active worker count if available; fall back to the live count.
+	// Always take min(snapshot, live) so that if the active cluster autoscales DOWN after the
+	// snapshot was taken the parity bar follows it down rather than staying locked at the higher
+	// snapshot value, which would deadlock pending promotion.
 	activeAvailable := activeCluster.Status.AvailableWorkerReplicas
 	if snapshotStr, ok := pendingCluster.Annotations[utils.ActiveWorkerSnapshotKey]; ok {
 		if snapshotVal, err := strconv.ParseInt(snapshotStr, 10, 32); err == nil {
-			activeAvailable = int32(snapshotVal)
+			snapshotWorkers := int32(snapshotVal)
+			if snapshotWorkers < activeAvailable {
+				activeAvailable = snapshotWorkers
+			}
 		}
 	}
 
