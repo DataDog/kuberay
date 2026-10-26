@@ -37,6 +37,16 @@ const (
 	// uses this snapshot instead of the live active count so that autoscaling on the active cluster
 	// during the upgrade does not raise the parity bar and stall promotion.
 	ActiveWorkerSnapshotKey = "ray.io/active-worker-snapshot"
+	// PendingImpliedCapacityMinKey records the running minimum of the active cluster's implied
+	// full-load capacity observed over the course of a skipGateway incremental upgrade, stored in
+	// hundredths of a worker. Implied full-load capacity is the active cluster's live available
+	// workers extrapolated back to 100% traffic (live * 100 / (100 - trafficRoutedPercent)): it stays
+	// near the snapshot while the active cluster only sheds workers in proportion to the traffic
+	// shifted away from it, and drops below the snapshot when total traffic genuinely decreases.
+	// isPendingClusterCapacityReady lowers the parity bar to this minimum so that a genuine traffic
+	// drop does not require the pending cluster to over-provision to the original peak, while a
+	// purely upgrade-induced scale-down of the active cluster leaves the bar at the snapshot.
+	PendingImpliedCapacityMinKey = "ray.io/implied-capacity-min"
 
 	// Labels for feature RayMultihostIndexing
 	//

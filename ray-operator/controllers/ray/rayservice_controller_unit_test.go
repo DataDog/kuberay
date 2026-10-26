@@ -1984,7 +1984,7 @@ func TestReconcileServeTargetCapacity(t *testing.T) {
 				ServeConfigs: lru.New(10),
 			}
 
-			err := reconciler.reconcileServeTargetCapacity(ctx, rayService, rayCluster, fakeDashboard)
+			err := reconciler.reconcileServeTargetCapacity(ctx, rayService, rayCluster, fakeDashboard, nil)
 			require.NoError(t, err)
 			require.NotEmpty(t, fakeDashboard.LastUpdatedConfig)
 
@@ -2872,6 +2872,15 @@ func makeClusterWithWorkersAndSnapshot(available int32, maxReplicas int32, snaps
 	return c
 }
 
+// withTrackedMin stamps the running-minimum implied capacity annotation, in hundredths of a worker.
+func withTrackedMin(c *rayv1.RayCluster, trackedMinHundredths int64) *rayv1.RayCluster {
+	if c.Annotations == nil {
+		c.Annotations = map[string]string{}
+	}
+	c.Annotations[utils.PendingImpliedCapacityMinKey] = strconv.FormatInt(trackedMinHundredths, 10)
+	return c
+}
+
 func makeHealthyApps() map[string]rayv1.AppStatus {
 	return map[string]rayv1.AppStatus{
 		"app": {
@@ -3071,7 +3080,7 @@ func TestReconcileServe_SkipConfigUpdateDuringRollback(t *testing.T) {
 			}
 
 			// Run reconcileServe
-			_, _, err := reconciler.reconcileServe(ctx, rayService, tt.clusterInstance)
+			_, _, err := reconciler.reconcileServe(ctx, rayService, tt.clusterInstance, nil)
 			require.NoError(t, err)
 
 			// Check if UpdateDeployments was called
@@ -3083,6 +3092,123 @@ func TestReconcileServe_SkipConfigUpdateDuringRollback(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestReconcileServeTargetCapacitySkipGatewayGate(t *testing.T) {
+	features.SetFeatureGateDuringTest(t, features.RayServiceIncrementalUpgrade, true)
+	ctx := context.TODO()
+
+	// TrafficRoutedPercent mirrors TargetCapacity under skipGateway, so each step is gated purely
+	// on the pending cluster being healthy and sized for the traffic it already serves.
+	makeRayService := func() *rayv1.RayService {
+		return &rayv1.RayService{
+			Spec: rayv1.RayServiceSpec{
+				UpgradeStrategy: &rayv1.RayServiceUpgradeStrategy{
+					Type: ptr.To(rayv1.RayServiceNewClusterWithIncrementalUpgrade),
+					ClusterUpgradeOptions: &rayv1.ClusterUpgradeOptions{
+						MaxSurgePercent: ptr.To(int32(20)),
+						SkipGateway:     ptr.To(true),
+					},
+				},
+				ServeConfigV2: `{"target_capacity": 0}`,
+			},
+			Status: rayv1.RayServiceStatuses{
+				ActiveServiceStatus: rayv1.RayServiceStatus{
+					RayClusterName: "active",
+					// Total target capacity of 100 means the next step scales the pending cluster up.
+					TargetCapacity:       ptr.To(int32(60)),
+					TrafficRoutedPercent: ptr.To(int32(60)),
+				},
+				PendingServiceStatus: rayv1.RayServiceStatus{
+					RayClusterName:       "pending",
+					TargetCapacity:       ptr.To(int32(40)),
+					TrafficRoutedPercent: ptr.To(int32(40)),
+				},
+			},
+		}
+	}
+
+	// snapshot=3 at TrafficRoutedPercent=40 requires ceil(0.4*3)=2 available workers.
+	makeCapacityCtx := func(pendingWorkers int32, apps map[string]rayv1.AppStatus) *upgradeCapacityContext {
+		return &upgradeCapacityContext{
+			activeCluster:  makeClusterWithWorkers(2, 5),
+			pendingCluster: makeClusterWithWorkersAndSnapshot(pendingWorkers, 5, 3),
+			pendingApps:    apps,
+		}
+	}
+
+	tests := []struct {
+		name        string
+		capacityCtx *upgradeCapacityContext
+		wantAdvance bool
+	}{
+		{name: "advances when pending is healthy and sized for current traffic", capacityCtx: makeCapacityCtx(2, makeHealthyApps()), wantAdvance: true},
+		{name: "holds when pending is short of workers for current traffic", capacityCtx: makeCapacityCtx(1, makeHealthyApps())},
+		{name: "holds when pending Serve applications are not healthy", capacityCtx: makeCapacityCtx(2, nil)},
+		{name: "holds when no capacity context is available"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rayService := makeRayService()
+			fakeDashboard := &utils.FakeRayDashboardClient{}
+			reconciler := &RayServiceReconciler{ServeConfigs: lru.New(10)}
+			pendingCluster := &rayv1.RayCluster{ObjectMeta: metav1.ObjectMeta{Name: "pending"}}
+
+			err := reconciler.reconcileServeTargetCapacity(ctx, rayService, pendingCluster, fakeDashboard, tt.capacityCtx)
+			require.NoError(t, err)
+
+			if tt.wantAdvance {
+				assert.Equal(t, int32(60), *rayService.Status.PendingServiceStatus.TargetCapacity)
+				assert.JSONEq(t, `{"target_capacity":60}`, string(fakeDashboard.LastUpdatedConfig))
+			} else {
+				assert.Equal(t, int32(40), *rayService.Status.PendingServiceStatus.TargetCapacity)
+				assert.Empty(t, fakeDashboard.LastUpdatedConfig)
+			}
+		})
+	}
+}
+
+func TestReconcileServeTargetCapacitySkipGatewayRollback(t *testing.T) {
+	features.SetFeatureGateDuringTest(t, features.RayServiceIncrementalUpgrade, true)
+	ctx := context.TODO()
+
+	// Mid-rollback the two clusters' target capacities sum to more than 100, so the active
+	// cluster's TargetCapacity (20) and its mirrored TrafficRoutedPercent (100 - 100 = 0) disagree.
+	// That disagreement must not defer the rollback under skipGateway, or it never finishes.
+	rayService := &rayv1.RayService{
+		Spec: rayv1.RayServiceSpec{
+			UpgradeStrategy: &rayv1.RayServiceUpgradeStrategy{
+				Type: ptr.To(rayv1.RayServiceNewClusterWithIncrementalUpgrade),
+				ClusterUpgradeOptions: &rayv1.ClusterUpgradeOptions{
+					MaxSurgePercent: ptr.To(int32(20)),
+					SkipGateway:     ptr.To(true),
+				},
+			},
+			ServeConfigV2: `{"target_capacity": 100}`,
+		},
+		Status: rayv1.RayServiceStatuses{
+			ActiveServiceStatus: rayv1.RayServiceStatus{
+				RayClusterName:       "active",
+				TargetCapacity:       ptr.To(int32(20)),
+				TrafficRoutedPercent: ptr.To(int32(0)),
+			},
+			PendingServiceStatus: rayv1.RayServiceStatus{
+				RayClusterName:       "pending",
+				TargetCapacity:       ptr.To(int32(100)),
+				TrafficRoutedPercent: ptr.To(int32(100)),
+			},
+		},
+	}
+	setCondition(rayService, rayv1.RollbackInProgress, metav1.ConditionTrue, rayv1.TargetClusterChanged, "rolling back")
+
+	fakeDashboard := &utils.FakeRayDashboardClient{}
+	reconciler := &RayServiceReconciler{ServeConfigs: lru.New(10)}
+	pendingCluster := &rayv1.RayCluster{ObjectMeta: metav1.ObjectMeta{Name: "pending"}}
+
+	require.NoError(t, reconciler.reconcileServeTargetCapacity(ctx, rayService, pendingCluster, fakeDashboard, nil))
+	assert.Equal(t, int32(80), *rayService.Status.PendingServiceStatus.TargetCapacity)
+	assert.JSONEq(t, `{"target_capacity":80}`, string(fakeDashboard.LastUpdatedConfig))
 }
 
 func TestIsPendingClusterCapacityReady(t *testing.T) {
@@ -3141,6 +3267,205 @@ func TestIsPendingClusterCapacityReady(t *testing.T) {
 		pending := makeClusterWithWorkers(2, 5)
 		assert.False(t, isPendingClusterCapacityReady(makeHealthyApps(), active, pending, 100))
 	})
+
+	t.Run("tracked minimum lowers the bar below the snapshot (genuine traffic drop)", func(t *testing.T) {
+		// Traffic halved after the snapshot was taken: implied full-load capacity bottomed out at
+		// 1.67 workers, so at 100% traffic the pending cluster needs ceil(1.67)=2 rather than 3.
+		active := makeClusterWithWorkers(1, 5)
+		pending := withTrackedMin(makeClusterWithWorkersAndSnapshot(2, 5, 3), 167)
+		assert.True(t, isPendingClusterCapacityReady(makeHealthyApps(), active, pending, 100))
+
+		pending = withTrackedMin(makeClusterWithWorkersAndSnapshot(1, 5, 3), 167)
+		assert.False(t, isPendingClusterCapacityReady(makeHealthyApps(), active, pending, 100),
+			"one worker is still short of ceil(1.67)=2")
+	})
+
+	t.Run("tracked minimum above the snapshot does not raise the bar", func(t *testing.T) {
+		// Upgrade-induced scale-down only: the active cluster shed workers in proportion to the
+		// traffic shifted away, so the implied capacity reads at or above the snapshot (3.75 here)
+		// and the bar stays at the snapshot of 3.
+		active := makeClusterWithWorkers(1, 5)
+		pending := withTrackedMin(makeClusterWithWorkersAndSnapshot(2, 5, 3), 375)
+		assert.False(t, isPendingClusterCapacityReady(makeHealthyApps(), active, pending, 100))
+
+		pending = withTrackedMin(makeClusterWithWorkersAndSnapshot(3, 5, 3), 375)
+		assert.True(t, isPendingClusterCapacityReady(makeHealthyApps(), active, pending, 100))
+	})
+
+	t.Run("parity is checked at the current traffic level, not the next one", func(t *testing.T) {
+		// snapshot=3 at TrafficRoutedPercent=40 requires ceil(0.4*3)=2 workers. The pending cluster
+		// has exactly 2, so this step passes even though the next step (60%) would need 2 more.
+		active := makeClusterWithWorkers(2, 5)
+		pending := makeClusterWithWorkersAndSnapshot(2, 5, 3)
+		assert.True(t, isPendingClusterCapacityReady(makeHealthyApps(), active, pending, 40))
+	})
+
+	t.Run("tracked minimum is used when the snapshot annotation is absent", func(t *testing.T) {
+		active := makeClusterWithWorkers(4, 5)
+		pending := withTrackedMin(makeClusterWithWorkers(2, 5), 200)
+		assert.True(t, isPendingClusterCapacityReady(makeHealthyApps(), active, pending, 100),
+			"tracked min of 2 workers should be preferred over the live active count of 4")
+	})
+}
+
+func TestImpliedFullLoadCapacity(t *testing.T) {
+	tests := []struct {
+		name                 string
+		liveWorkers          int32
+		trafficRoutedPercent int32
+		want                 int64
+		wantOK               bool
+	}{
+		{name: "no traffic shifted yet, implied capacity equals live count", liveWorkers: 3, trafficRoutedPercent: 0, want: 300, wantOK: true},
+		{name: "proportional scale-down reads back as the original capacity", liveWorkers: 2, trafficRoutedPercent: 40, want: 333, wantOK: true},
+		{name: "genuine traffic drop reads below the original capacity", liveWorkers: 1, trafficRoutedPercent: 40, want: 166, wantOK: true},
+		{name: "minReplicas floor at high traffic inflates the reading", liveWorkers: 1, trafficRoutedPercent: 80, want: 500, wantOK: true},
+		{name: "no signal once all traffic is on the pending cluster", liveWorkers: 1, trafficRoutedPercent: 100, wantOK: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := impliedFullLoadCapacity(tt.liveWorkers, tt.trafficRoutedPercent)
+			assert.Equal(t, tt.wantOK, ok)
+			if tt.wantOK {
+				assert.Equal(t, tt.want, got)
+			}
+		})
+	}
+}
+
+func TestReconcileImpliedCapacityMin(t *testing.T) {
+	newScheme := runtime.NewScheme()
+	_ = rayv1.AddToScheme(newScheme)
+	ctx := context.Background()
+
+	makeRayService := func(skipGateway bool, trafficRoutedPercent int32, isRollback bool) *rayv1.RayService {
+		rs := &rayv1.RayService{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-rayservice", Namespace: "test-ns"},
+			Spec: rayv1.RayServiceSpec{
+				UpgradeStrategy: &rayv1.RayServiceUpgradeStrategy{
+					Type: ptr.To(rayv1.RayServiceNewClusterWithIncrementalUpgrade),
+					ClusterUpgradeOptions: &rayv1.ClusterUpgradeOptions{
+						SkipGateway: ptr.To(skipGateway),
+					},
+				},
+			},
+			Status: rayv1.RayServiceStatuses{
+				PendingServiceStatus: rayv1.RayServiceStatus{
+					RayClusterName:       "pending-cluster",
+					TrafficRoutedPercent: ptr.To(trafficRoutedPercent),
+				},
+			},
+		}
+		if isRollback {
+			setCondition(rs, rayv1.RollbackInProgress, metav1.ConditionTrue, rayv1.TargetClusterChanged, "rolling back")
+		}
+		return rs
+	}
+
+	makePendingCluster := func(annotations map[string]string) *rayv1.RayCluster {
+		return &rayv1.RayCluster{
+			ObjectMeta: metav1.ObjectMeta{Name: "pending-cluster", Namespace: "test-ns", Annotations: annotations},
+		}
+	}
+
+	storedTrackedMin := func(t *testing.T, r *RayServiceReconciler) (string, bool) {
+		t.Helper()
+		cluster := &rayv1.RayCluster{}
+		require.NoError(t, r.Client.Get(ctx, client.ObjectKey{Name: "pending-cluster", Namespace: "test-ns"}, cluster))
+		value, ok := cluster.Annotations[utils.PendingImpliedCapacityMinKey]
+		return value, ok
+	}
+
+	tests := []struct {
+		name             string
+		existing         map[string]string
+		skipGateway      bool
+		isRollback       bool
+		trafficPercent   int32
+		activeWorkers    int32
+		wantAnnotation   string
+		wantAnnotationOK bool
+	}{
+		{
+			name:             "records the implied capacity on the first observation",
+			skipGateway:      true,
+			trafficPercent:   40,
+			activeWorkers:    1,
+			wantAnnotation:   "166",
+			wantAnnotationOK: true,
+		},
+		{
+			name:             "lowers an existing minimum",
+			existing:         map[string]string{utils.PendingImpliedCapacityMinKey: "300"},
+			skipGateway:      true,
+			trafficPercent:   40,
+			activeWorkers:    1,
+			wantAnnotation:   "166",
+			wantAnnotationOK: true,
+		},
+		{
+			name:             "keeps the existing minimum when the new reading is higher",
+			existing:         map[string]string{utils.PendingImpliedCapacityMinKey: "166"},
+			skipGateway:      true,
+			trafficPercent:   80,
+			activeWorkers:    1,
+			wantAnnotation:   "166",
+			wantAnnotationOK: true,
+		},
+		{
+			name:             "does not update at 100% traffic, where the active count means nothing",
+			existing:         map[string]string{utils.PendingImpliedCapacityMinKey: "166"},
+			skipGateway:      true,
+			trafficPercent:   100,
+			activeWorkers:    1,
+			wantAnnotation:   "166",
+			wantAnnotationOK: true,
+		},
+		{
+			name:           "ignores a zero active worker count",
+			skipGateway:    true,
+			trafficPercent: 40,
+			activeWorkers:  0,
+		},
+		{
+			name:           "no-op during rollback",
+			skipGateway:    true,
+			isRollback:     true,
+			trafficPercent: 40,
+			activeWorkers:  1,
+		},
+		{
+			name:           "no-op when skipGateway is disabled",
+			trafficPercent: 40,
+			activeWorkers:  1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pendingCluster := makePendingCluster(tt.existing)
+			fakeClient := clientFake.NewClientBuilder().WithScheme(newScheme).WithRuntimeObjects(pendingCluster).Build()
+			r := &RayServiceReconciler{Client: fakeClient, Recorder: &record.FakeRecorder{}, Scheme: newScheme}
+
+			activeCluster := makeClusterWithWorkers(tt.activeWorkers, 5)
+			rs := makeRayService(tt.skipGateway, tt.trafficPercent, tt.isRollback)
+			require.NoError(t, r.reconcileImpliedCapacityMin(ctx, rs, activeCluster, pendingCluster))
+
+			value, ok := storedTrackedMin(t, r)
+			assert.Equal(t, tt.wantAnnotationOK, ok)
+			if tt.wantAnnotationOK {
+				assert.Equal(t, tt.wantAnnotation, value)
+			}
+		})
+	}
+
+	t.Run("no-op when either cluster is absent", func(t *testing.T) {
+		r := &RayServiceReconciler{Client: clientFake.NewClientBuilder().WithScheme(newScheme).Build()}
+		rs := makeRayService(true, 40, false)
+		require.NoError(t, r.reconcileImpliedCapacityMin(ctx, rs, nil, makePendingCluster(nil)))
+		require.NoError(t, r.reconcileImpliedCapacityMin(ctx, rs, makeClusterWithWorkers(1, 5), nil))
+	})
 }
 
 func TestReconcileStableServeService(t *testing.T) {
@@ -3166,7 +3491,7 @@ func TestReconcileStableServeService(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{Name: svcName, Namespace: namespace},
 			Spec: rayv1.RayServiceSpec{
 				UpgradeStrategy: &rayv1.RayServiceUpgradeStrategy{
-					Type: ptr.To(rayv1.NewClusterWithIncrementalUpgrade),
+					Type: ptr.To(rayv1.RayServiceNewClusterWithIncrementalUpgrade),
 				},
 				ServeService: serveService,
 			},
@@ -3216,7 +3541,7 @@ func TestReconcileStableServeService(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{Name: stableSvcName, Namespace: namespace},
 			Spec: corev1.ServiceSpec{
 				Selector: map[string]string{
-					utils.RayClusterLabelKey:             "old-cluster",
+					utils.RayClusterLabelKey:               "old-cluster",
 					utils.RayClusterServingServiceLabelKey: utils.EnableRayClusterServingServiceTrue,
 				},
 			},
@@ -3243,7 +3568,7 @@ func TestReconcileStableServeService(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{Name: stableSvcName, Namespace: namespace},
 			Spec: corev1.ServiceSpec{
 				Selector: map[string]string{
-					utils.RayClusterLabelKey:             "old-cluster",
+					utils.RayClusterLabelKey:               "old-cluster",
 					utils.RayClusterServingServiceLabelKey: utils.EnableRayClusterServingServiceTrue,
 				},
 			},
@@ -3263,7 +3588,7 @@ func TestReconcileStableServeService(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{Name: stableSvcName, Namespace: namespace, ResourceVersion: "42"},
 			Spec: corev1.ServiceSpec{
 				Selector: map[string]string{
-					utils.RayClusterLabelKey:             "current-cluster",
+					utils.RayClusterLabelKey:               "current-cluster",
 					utils.RayClusterServingServiceLabelKey: utils.EnableRayClusterServingServiceTrue,
 				},
 			},
@@ -3277,4 +3602,37 @@ func TestReconcileStableServeService(t *testing.T) {
 		require.NoError(t, r.Client.Get(ctx, client.ObjectKey{Name: stableSvcName, Namespace: namespace}, unchanged))
 		assert.Equal(t, "42", unchanged.ResourceVersion, "service should not be updated when selector is already correct")
 	})
+}
+
+func TestModifyRayClusterPreservesUpgradeAnnotations(t *testing.T) {
+	ctx := context.Background()
+
+	currentCluster := &rayv1.RayCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pending-cluster",
+			Namespace: "default",
+			Annotations: map[string]string{
+				utils.ActiveWorkerSnapshotKey:      "3",
+				utils.PendingImpliedCapacityMinKey: "166",
+				utils.KubeRayVersion:               "old",
+			},
+		},
+	}
+	goalCluster := &rayv1.RayCluster{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pending-cluster",
+			Namespace: "default",
+			Annotations: map[string]string{
+				utils.KubeRayVersion: utils.KUBERAY_VERSION,
+			},
+		},
+	}
+
+	modifyRayCluster(ctx, currentCluster, goalCluster)
+
+	// An in-place update of the pending cluster must not reset the capacity-parity baseline.
+	assert.Equal(t, "3", currentCluster.Annotations[utils.ActiveWorkerSnapshotKey])
+	assert.Equal(t, "166", currentCluster.Annotations[utils.PendingImpliedCapacityMinKey])
+	// Spec-derived annotations still come from the goal cluster.
+	assert.Equal(t, utils.KUBERAY_VERSION, currentCluster.Annotations[utils.KubeRayVersion])
 }

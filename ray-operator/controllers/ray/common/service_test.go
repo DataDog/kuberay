@@ -906,7 +906,7 @@ func TestBuildServeServiceForRayService_IncrementalUpgrade(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "my-service", Namespace: "default"},
 		Spec: rayv1.RayServiceSpec{
 			UpgradeStrategy: &rayv1.RayServiceUpgradeStrategy{
-				Type: ptr.To(rayv1.NewClusterWithIncrementalUpgrade),
+				Type: ptr.To(rayv1.RayServiceNewClusterWithIncrementalUpgrade),
 			},
 			// spec.serveService with a custom worker-only selector (typical for skipGateway).
 			ServeService: &corev1.Service{

@@ -184,6 +184,13 @@ func (r *RayServiceReconciler) Reconcile(ctx context.Context, request ctrl.Reque
 					return ctrl.Result{RequeueAfter: ServiceDefaultRequeueDuration}, err
 				}
 			}
+
+			// Record the active cluster's implied full-load capacity before any target_capacity is
+			// advanced this reconcile, so that the capacity parity gate below reads a value derived
+			// from the traffic split currently in effect.
+			if err := r.reconcileImpliedCapacityMin(ctx, rayServiceInstance, activeRayClusterInstance, pendingRayClusterInstance); err != nil {
+				return ctrl.Result{RequeueAfter: ServiceDefaultRequeueDuration}, err
+			}
 		}
 	}
 
@@ -205,23 +212,28 @@ func (r *RayServiceReconciler) Reconcile(ctx context.Context, request ctrl.Reque
 	// based on total TargetCapacity.
 	isActiveClusterReady, isPendingClusterReady := false, false
 	var activeClusterServeApplications, pendingClusterServeApplications map[string]rayv1.AppStatus = nil, nil
+	capacityCtx := &upgradeCapacityContext{
+		activeCluster:  activeRayClusterInstance,
+		pendingCluster: pendingRayClusterInstance,
+	}
 	if pendingRayClusterInstance != nil {
 		logger.Info("Reconciling the Serve applications for pending cluster", "clusterName", pendingRayClusterInstance.Name)
-		if isPendingClusterReady, pendingClusterServeApplications, err = r.reconcileServe(ctx, rayServiceInstance, pendingRayClusterInstance); err != nil {
+		if isPendingClusterReady, pendingClusterServeApplications, err = r.reconcileServe(ctx, rayServiceInstance, pendingRayClusterInstance, capacityCtx); err != nil {
 			return ctrl.Result{RequeueAfter: ServiceDefaultRequeueDuration}, err
 		}
+		capacityCtx.pendingApps = pendingClusterServeApplications
 	}
 	if activeRayClusterInstance != nil && pendingRayClusterInstance == nil &&
 		!shouldPrepareNewCluster(ctx, rayServiceInstance, activeRayClusterInstance, nil, false) {
 		// Only reconcile serve applications for the active cluster when there is no pending cluster. That is, during the upgrade process,
 		// in-place update and updating the serve application status for the active cluster will not work.
 		logger.Info("Reconciling the Serve applications for active cluster", "clusterName", activeRayClusterInstance.Name)
-		if isActiveClusterReady, activeClusterServeApplications, err = r.reconcileServe(ctx, rayServiceInstance, activeRayClusterInstance); err != nil {
+		if isActiveClusterReady, activeClusterServeApplications, err = r.reconcileServe(ctx, rayServiceInstance, activeRayClusterInstance, capacityCtx); err != nil {
 			return ctrl.Result{RequeueAfter: ServiceDefaultRequeueDuration}, err
 		}
 	} else if activeRayClusterInstance != nil && pendingRayClusterInstance != nil && utils.IsIncrementalUpgradeEnabled(&rayServiceInstance.Spec) {
 		logger.Info("Reconciling the Serve applications for active cluster during NewClusterWithIncrementalUpgrade", "clusterName", activeRayClusterInstance.Name)
-		if isActiveClusterReady, activeClusterServeApplications, err = r.reconcileServe(ctx, rayServiceInstance, activeRayClusterInstance); err != nil {
+		if isActiveClusterReady, activeClusterServeApplications, err = r.reconcileServe(ctx, rayServiceInstance, activeRayClusterInstance, capacityCtx); err != nil {
 			return ctrl.Result{RequeueAfter: ServiceDefaultRequeueDuration}, err
 		}
 	}
@@ -449,22 +461,18 @@ func (r *RayServiceReconciler) calculateStatus(
 			activeWeight, pendingWeight := int32(-1), int32(-1)
 			if utils.IsSkipGateway(&rayServiceInstance.Spec) {
 				if pendingCluster != nil {
-					// SkipGateway + endpoint gate: set TrafficRoutedPercent = TargetCapacity only
-					// when the pending cluster's Serve deployments are HEALTHY, meaning the
-					// autoscaling round has fully settled. The gate in reconcileServeTargetCapacity
-					// advances target_capacity only when TrafficRoutedPercent == TargetCapacity.
-					// The client-side LB reads targetCapacity from status directly for traffic routing
-					// and does not rely on TrafficRoutedPercent.
+					// SkipGateway: the client-side load balancer reads targetCapacity from status
+					// and routes traffic by it, so TrafficRoutedPercent mirrors targetCapacity —
+					// traffic is already flowing at that level and reporting anything else would
+					// misreport reality. Advancing the two together is also what gives the pending
+					// cluster's autoscaler a demand signal at each step; the capacity gate lives in
+					// reconcileServeTargetCapacity, which holds targetCapacity until the pending
+					// cluster has enough workers for the traffic it is already receiving.
 					pendingTargetCap := ptr.Deref(rayServiceInstance.Status.PendingServiceStatus.TargetCapacity, 0)
-					if isPendingClusterCapacityReady(pendingClusterServeApplications, activeCluster, pendingCluster, pendingTargetCap) {
-						pendingWeight = pendingTargetCap
-						activeWeight = 100 - pendingWeight
-						logger.Info("SkipGateway: pending cluster capacity ready, advancing TrafficRoutedPercent to match TargetCapacity.",
-							"pendingTargetCapacity", pendingTargetCap, "pendingWeight", pendingWeight, "activeWeight", activeWeight)
-					} else {
-						logger.Info("SkipGateway: pending cluster not yet capacity-ready, holding TrafficRoutedPercent until deployments are healthy and replicas are sufficient.",
-							"pendingTargetCapacity", pendingTargetCap)
-					}
+					pendingWeight = pendingTargetCap
+					activeWeight = 100 - pendingWeight
+					logger.Info("SkipGateway: setting TrafficRoutedPercent to match TargetCapacity.",
+						"pendingTargetCapacity", pendingTargetCap, "pendingWeight", pendingWeight, "activeWeight", activeWeight)
 				}
 				// No pending cluster: no upgrade in progress, leave TrafficRoutedPercent unchanged.
 			} else {
@@ -1257,7 +1265,23 @@ func modifyRayCluster(ctx context.Context, currentCluster, goalCluster *rayv1.Ra
 
 	// Update the labels and annotations
 	currentCluster.Labels = goalCluster.Labels
+	previousAnnotations := currentCluster.Annotations
 	currentCluster.Annotations = goalCluster.Annotations
+
+	// `goalCluster` is reconstructed from the RayService spec, so it only carries the annotations
+	// set at creation time. Annotations the operator writes later to track upgrade progress are not
+	// derivable from the spec and must survive an in-place update of the cluster; losing them mid
+	// upgrade would reset the capacity-parity baseline.
+	for _, key := range []string{utils.ActiveWorkerSnapshotKey, utils.PendingImpliedCapacityMinKey} {
+		if value, ok := previousAnnotations[key]; ok {
+			if _, exists := currentCluster.Annotations[key]; !exists {
+				if currentCluster.Annotations == nil {
+					currentCluster.Annotations = map[string]string{}
+				}
+				currentCluster.Annotations[key] = value
+			}
+		}
+	}
 }
 
 func (r *RayServiceReconciler) createRayClusterInstance(ctx context.Context, rayServiceInstance *rayv1.RayService, activeCluster *rayv1.RayCluster) (*rayv1.RayCluster, error) {
@@ -1354,30 +1378,97 @@ func arePendingServeDeploymentsHealthy(apps map[string]rayv1.AppStatus) bool {
 	return true
 }
 
-// isPendingClusterCapacityReady returns true when it is safe to advance TrafficRoutedPercent
-// to pendingTargetCap for a skipGateway upgrade. It combines two gates:
+// capacityScale is the fixed-point scale (hundredths of a worker) used for implied full-load
+// capacity. Implied capacity is fractional by nature — extrapolating a live worker count back to
+// 100% traffic rarely lands on a whole worker — and rounding to whole workers at every step would
+// either inflate the parity bar (ceil) or erase small genuine traffic drops (floor).
+const capacityScale = 100
+
+// rayClusterAnnotationInt reads an integer annotation off a RayCluster. ok is false when the
+// cluster, the annotation, or a valid integer value is absent.
+func rayClusterAnnotationInt(cluster *rayv1.RayCluster, key string) (int64, bool) {
+	if cluster == nil {
+		return 0, false
+	}
+	raw, ok := cluster.Annotations[key]
+	if !ok {
+		return 0, false
+	}
+	parsed, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return parsed, true
+}
+
+// impliedFullLoadCapacity extrapolates the active cluster's live available worker count back to
+// the count it would need at 100% traffic, given that it currently serves
+// (100 - trafficRoutedPercent)% of the traffic. The result is scaled by capacityScale. ok is false
+// at trafficRoutedPercent >= 100, where the active cluster serves no traffic and its worker count
+// implies nothing about full-load capacity.
+func impliedFullLoadCapacity(liveWorkers int32, trafficRoutedPercent int32) (int64, bool) {
+	if trafficRoutedPercent < 0 || trafficRoutedPercent >= 100 {
+		return 0, false
+	}
+	return int64(liveWorkers) * capacityScale * 100 / int64(100-trafficRoutedPercent), true
+}
+
+// pendingParityCapacity returns the full-load capacity, scaled by capacityScale, that the parity
+// check holds the pending cluster to. It is min(snapshot, trackedMin) where:
+//
+//   - snapshot (ActiveWorkerSnapshotKey) is the active cluster's available worker count at pending
+//     cluster creation, i.e. the original full-load capacity. Using the snapshot rather than the
+//     live count keeps a mid-upgrade scale-UP of the active cluster from raising the parity bar.
+//   - trackedMin (PendingImpliedCapacityMinKey) is the running minimum implied full-load capacity
+//     observed during the upgrade, maintained by reconcileImpliedCapacityMin. It drops below the
+//     snapshot only when total traffic genuinely decreased, which is the one case where holding the
+//     bar at the snapshot would deadlock: the pending cluster's autoscaler will never provision for
+//     a peak that the current traffic does not justify.
+//
+// Falls back to the live active worker count when neither annotation is present (pending clusters
+// created before these annotations existed).
+func pendingParityCapacity(activeCluster, pendingCluster *rayv1.RayCluster) int64 {
+	capacity := int64(-1)
+	if snapshot, ok := rayClusterAnnotationInt(pendingCluster, utils.ActiveWorkerSnapshotKey); ok {
+		capacity = snapshot * capacityScale
+	}
+	if trackedMin, ok := rayClusterAnnotationInt(pendingCluster, utils.PendingImpliedCapacityMinKey); ok {
+		if capacity < 0 || trackedMin < capacity {
+			capacity = trackedMin
+		}
+	}
+	if capacity < 0 {
+		capacity = int64(activeCluster.Status.AvailableWorkerReplicas) * capacityScale
+	}
+	return capacity
+}
+
+// isPendingClusterCapacityReady returns true when it is safe to advance target_capacity (and with
+// it TrafficRoutedPercent) one step further in a skipGateway upgrade. It combines two gates:
 //
 //  1. Serve health: all pending cluster deployments must be HEALTHY (same as the base health gate).
-//  2. Capacity parity: the pending cluster must have enough available worker replicas to handle
-//     the traffic level it is about to receive.
+//  2. Capacity parity: the pending cluster must have enough available worker replicas for the
+//     traffic it is ALREADY receiving at trafficRoutedPercent.
 //
-// Parity check formula: pending.availableWorkers >= ceil(pendingTargetCap/100 * snapshotWorkers)
+// Parity check formula: pending.availableWorkers >= ceil(trafficRoutedPercent/100 * capacity),
+// where capacity comes from pendingParityCapacity.
 //
-// snapshotWorkers is read from the ActiveWorkerSnapshotKey annotation on the pending cluster,
-// which is stamped at pending cluster creation time. Using the snapshot instead of the live
-// active count prevents a mid-upgrade autoscale event on the active cluster from raising the
-// parity bar and stalling promotion. Falls back to the live active count when the annotation
-// is absent (e.g. pending clusters created before this feature).
+// Note that the check is evaluated at the CURRENT traffic level, not the next one. Under
+// skipGateway the client-side load balancer routes by target_capacity, so each step hands the
+// pending cluster real traffic and its autoscaler a real demand signal; the check then holds the
+// next step back until the autoscaler has caught up. Checking the NEXT level instead deadlocks
+// autoscaling clusters: the pending cluster would have to provision for traffic it has not been
+// given yet, which its autoscaler has no reason to do.
 //
 // The parity check is skipped (falls back to health-only) when:
 //   - Either cluster object is nil (no information to compare).
-//   - pending.maxReplicas < snapshotWorkers: the upgrade intentionally reduces capacity
+//   - pending.maxReplicas < capacity: the upgrade intentionally reduces capacity
 //     (e.g. cost reduction). Requiring parity would deadlock the upgrade since the pending
 //     cluster can never reach the active cluster's original replica count.
 func isPendingClusterCapacityReady(
 	apps map[string]rayv1.AppStatus,
 	activeCluster, pendingCluster *rayv1.RayCluster,
-	pendingTargetCap int32,
+	trafficRoutedPercent int32,
 ) bool {
 	if !arePendingServeDeploymentsHealthy(apps) {
 		return false
@@ -1387,21 +1478,7 @@ func isPendingClusterCapacityReady(
 		return true
 	}
 
-	// Use the snapshotted active worker count if available; fall back to the live count.
-	// Always take min(snapshot, live) so that if the active cluster autoscales DOWN after the
-	// snapshot was taken the parity bar follows it down rather than staying locked at the higher
-	// snapshot value, which would deadlock pending promotion.
-	activeAvailable := activeCluster.Status.AvailableWorkerReplicas
-	if snapshotStr, ok := pendingCluster.Annotations[utils.ActiveWorkerSnapshotKey]; ok {
-		if snapshotVal, err := strconv.ParseInt(snapshotStr, 10, 32); err == nil {
-			snapshotWorkers := int32(snapshotVal)
-			if snapshotWorkers < activeAvailable {
-				activeAvailable = snapshotWorkers
-			}
-		}
-	}
-
-	pendingAvailable := pendingCluster.Status.AvailableWorkerReplicas
+	capacity := pendingParityCapacity(activeCluster, pendingCluster)
 
 	// Sum maxReplicas across all worker groups on the pending cluster.
 	var pendingMaxReplicas int32
@@ -1412,13 +1489,67 @@ func isPendingClusterCapacityReady(
 	}
 
 	// Intentional capacity reduction: skip parity to avoid deadlock.
-	if pendingMaxReplicas < activeAvailable {
+	if int64(pendingMaxReplicas)*capacityScale < capacity {
 		return true
 	}
 
-	// ceil(pendingTargetCap/100 * activeAvailable) using integer arithmetic.
-	requiredReplicas := (pendingTargetCap*activeAvailable + 99) / 100
-	return pendingAvailable >= requiredReplicas
+	// ceil(trafficRoutedPercent/100 * capacity) using integer arithmetic, with capacity scaled.
+	const fullCapacity = 100 * capacityScale
+	requiredReplicas := (int64(trafficRoutedPercent)*capacity + fullCapacity - 1) / fullCapacity
+	return int64(pendingCluster.Status.AvailableWorkerReplicas) >= requiredReplicas
+}
+
+// reconcileImpliedCapacityMin maintains the PendingImpliedCapacityMinKey annotation on the pending
+// cluster: the running minimum of the active cluster's implied full-load capacity over the course
+// of the upgrade.
+//
+// Only the minimum is kept because the reading degrades as the upgrade progresses. Once the active
+// cluster bottoms out at minReplicas its worker count stops tracking its traffic share, so the
+// extrapolation inflates — at trafficRoutedPercent=80 a single remaining worker implies a full-load
+// capacity of 5. Early steps, taken before the floor is hit, are the accurate ones, and taking the
+// minimum keeps those readings from being overwritten by the distorted later ones.
+func (r *RayServiceReconciler) reconcileImpliedCapacityMin(ctx context.Context, rayServiceInstance *rayv1.RayService, activeCluster, pendingCluster *rayv1.RayCluster) error {
+	if activeCluster == nil || pendingCluster == nil {
+		return nil
+	}
+	if !utils.IsSkipGateway(&rayServiceInstance.Spec) {
+		return nil
+	}
+	// During a rollback traffic is moving back to the active cluster and the pending cluster is
+	// being drained, so there is no parity bar left to lower.
+	if meta.IsStatusConditionTrue(rayServiceInstance.Status.Conditions, string(rayv1.RollbackInProgress)) {
+		return nil
+	}
+
+	// A zero reading carries no information about capacity — the active cluster's workers may
+	// simply not be up yet — and recording it would drop the parity bar to zero for the rest of
+	// the upgrade, letting target_capacity run to 100% against an empty pending cluster.
+	liveWorkers := activeCluster.Status.AvailableWorkerReplicas
+	if liveWorkers <= 0 {
+		return nil
+	}
+
+	trafficRoutedPercent := ptr.Deref(rayServiceInstance.Status.PendingServiceStatus.TrafficRoutedPercent, 0)
+	impliedCapacity, ok := impliedFullLoadCapacity(liveWorkers, trafficRoutedPercent)
+	if !ok {
+		// All traffic is on the pending cluster; keep the stored minimum as-is.
+		return nil
+	}
+	if stored, ok := rayClusterAnnotationInt(pendingCluster, utils.PendingImpliedCapacityMinKey); ok && stored <= impliedCapacity {
+		return nil
+	}
+
+	logger := ctrl.LoggerFrom(ctx)
+	logger.Info("SkipGateway: lowering tracked minimum implied full-load capacity of active cluster.",
+		"pendingCluster", pendingCluster.Name, "activeAvailableWorkers", liveWorkers,
+		"trafficRoutedPercent", trafficRoutedPercent, "impliedCapacityHundredths", impliedCapacity)
+
+	patch := client.MergeFrom(pendingCluster.DeepCopy())
+	if pendingCluster.Annotations == nil {
+		pendingCluster.Annotations = map[string]string{}
+	}
+	pendingCluster.Annotations[utils.PendingImpliedCapacityMinKey] = strconv.FormatInt(impliedCapacity, 10)
+	return r.Patch(ctx, pendingCluster, patch)
 }
 
 // abortUpgradeIfTimedOut checks whether the pending cluster has exceeded UpgradeTimeoutSeconds.
@@ -1667,7 +1798,7 @@ func (r *RayServiceReconciler) applyServeTargetCapacity(ctx context.Context, ray
 
 // reconcileServeTargetCapacity reconciles the target_capacity of the ServeConfig for a given RayCluster during
 // a NewClusterWithIncrementalUpgrade while also updating the Status.TargetCapacity of the Active and Pending RayServices.
-func (r *RayServiceReconciler) reconcileServeTargetCapacity(ctx context.Context, rayServiceInstance *rayv1.RayService, rayClusterInstance *rayv1.RayCluster, rayDashboardClient dashboardclient.RayDashboardClientInterface) error {
+func (r *RayServiceReconciler) reconcileServeTargetCapacity(ctx context.Context, rayServiceInstance *rayv1.RayService, rayClusterInstance *rayv1.RayCluster, rayDashboardClient dashboardclient.RayDashboardClientInterface, capacityCtx *upgradeCapacityContext) error {
 	logger := ctrl.LoggerFrom(ctx)
 	logger.Info("reconcileServeTargetCapacity", "RayService", rayServiceInstance.Name)
 
@@ -1698,7 +1829,12 @@ func (r *RayServiceReconciler) reconcileServeTargetCapacity(ctx context.Context,
 		// Rollback the upgrade. The active RayCluster should be scaled back to 100% target_capacity,
 		// while the pending RayCluster is scaled to 0%. This is the inverse of the regular upgrade path.
 		activeTrafficRoutedPercent := ptr.Deref(activeRayServiceStatus.TrafficRoutedPercent, 0)
-		if activeTargetCapacity != activeTrafficRoutedPercent {
+		// This deferral waits for the Gateway to actually shift HTTPRoute weights onto the active
+		// cluster. Under skipGateway there is nothing to wait for: TrafficRoutedPercent is derived
+		// from target_capacity (active = 100 - pendingTargetCapacity), and during a rollback the two
+		// clusters' target capacities sum to more than 100, so active TargetCapacity and
+		// TrafficRoutedPercent disagree for the whole rollback and the deferral would never lift.
+		if !utils.IsSkipGateway(&rayServiceInstance.Spec) && activeTargetCapacity != activeTrafficRoutedPercent {
 			logger.Info("Traffic is rolling back to active cluster, deferring capacity update.", "ActiveTargetCapacity", activeTargetCapacity, "ActiveTrafficRoutedPercent", activeTrafficRoutedPercent)
 			return nil
 		}
@@ -1723,6 +1859,24 @@ func (r *RayServiceReconciler) reconcileServeTargetCapacity(ctx context.Context,
 	if pendingTargetCapacity != pendingTrafficRoutedPercent {
 		logger.Info("Traffic is currently being migrated to pending cluster", "RayCluster", pendingRayServiceStatus.RayClusterName, "TargetCapacity", pendingTargetCapacity, "TrafficRoutedPercent", pendingTrafficRoutedPercent)
 		return nil
+	}
+
+	// SkipGateway: TrafficRoutedPercent mirrors target_capacity, so the check above never holds
+	// anything back and every step of the upgrade — scaling the pending cluster up and the active
+	// cluster down — is gated here instead. The pending cluster must be healthy and have enough
+	// workers for the traffic it is already serving before it is handed any more.
+	if utils.IsSkipGateway(&rayServiceInstance.Spec) {
+		if capacityCtx == nil {
+			// Callers must supply the cluster objects and pending Serve applications needed to
+			// evaluate the gate. Hold rather than advance blind.
+			logger.Info("SkipGateway: holding target_capacity, no capacity context available for the parity check.")
+			return nil
+		}
+		if !isPendingClusterCapacityReady(capacityCtx.pendingApps, capacityCtx.activeCluster, capacityCtx.pendingCluster, pendingTrafficRoutedPercent) {
+			logger.Info("SkipGateway: holding target_capacity until the pending cluster's Serve deployments are healthy and it has enough workers for the traffic it already receives.",
+				"TargetCapacity", pendingTargetCapacity, "TrafficRoutedPercent", pendingTrafficRoutedPercent)
+			return nil
+		}
 	}
 
 	// There are two cases:
@@ -1903,9 +2057,21 @@ func (r *RayServiceReconciler) reconcileServices(ctx context.Context, rayService
 	return nil, err
 }
 
+// upgradeCapacityContext carries the state needed to evaluate the skipGateway capacity parity gate
+// from inside the per-cluster Serve reconciliation, which otherwise only sees one cluster at a time:
+// both cluster objects, and the pending cluster's Serve application statuses as observed during
+// this reconcile. pendingApps may be nil when reconciling the pending cluster itself — reconcileServe
+// fetches that cluster's applications and uses them directly.
+type upgradeCapacityContext struct {
+	activeCluster  *rayv1.RayCluster
+	pendingCluster *rayv1.RayCluster
+	pendingApps    map[string]rayv1.AppStatus
+}
+
 // Reconciles the Serve applications on the RayCluster. Returns (isReady, serveApplicationStatus, error).
 // The `isReady` flag indicates whether the RayCluster is ready to handle incoming traffic.
-func (r *RayServiceReconciler) reconcileServe(ctx context.Context, rayServiceInstance *rayv1.RayService, rayClusterInstance *rayv1.RayCluster) (bool, map[string]rayv1.AppStatus, error) {
+// capacityCtx is required during a skipGateway incremental upgrade and may be nil otherwise.
+func (r *RayServiceReconciler) reconcileServe(ctx context.Context, rayServiceInstance *rayv1.RayService, rayClusterInstance *rayv1.RayCluster, capacityCtx *upgradeCapacityContext) (bool, map[string]rayv1.AppStatus, error) {
 	logger := ctrl.LoggerFrom(ctx)
 	var err error
 	var serveApplications map[string]rayv1.AppStatus
@@ -1980,7 +2146,16 @@ func (r *RayServiceReconciler) reconcileServe(ctx context.Context, rayServiceIns
 		incrementalUpgradeUpdate, reason := r.checkIfNeedTargetCapacityUpdate(ctx, rayServiceInstance)
 		logger.Info("checkIfNeedTargetCapacityUpdate", "incrementalUpgradeUpdate", incrementalUpgradeUpdate, "reason", reason)
 		if incrementalUpgradeUpdate {
-			if err := r.reconcileServeTargetCapacity(ctx, rayServiceInstance, rayClusterInstance, rayDashboardClient); err != nil {
+			// When reconciling the pending cluster, the applications just fetched above are the
+			// freshest view of its Serve health; prefer them over whatever the caller passed in.
+			if capacityCtx != nil && capacityCtx.pendingCluster != nil && rayClusterInstance.Name == capacityCtx.pendingCluster.Name {
+				capacityCtx = &upgradeCapacityContext{
+					activeCluster:  capacityCtx.activeCluster,
+					pendingCluster: capacityCtx.pendingCluster,
+					pendingApps:    serveApplications,
+				}
+			}
+			if err := r.reconcileServeTargetCapacity(ctx, rayServiceInstance, rayClusterInstance, rayDashboardClient, capacityCtx); err != nil {
 				r.Recorder.Eventf(rayServiceInstance, corev1.EventTypeWarning, string(utils.FailedToUpdateTargetCapacity), "Failed to update target_capacity of serve applications to the RayCluster %s/%s: %v", rayClusterInstance.Namespace, rayClusterInstance.Name, err)
 				return false, serveApplications, err
 			}
