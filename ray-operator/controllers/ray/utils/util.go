@@ -987,34 +987,63 @@ func FetchHeadServiceURL(ctx context.Context, cli client.Client, rayCluster *ray
 	return headServiceURL, nil
 }
 
+// dashboardTLSRequired reports whether the operator must speak TLS to Ray dashboards.
+//
+// KUBERAY_DASHBOARD_DOMAIN_SUFFIX is the signal: it routes dashboard traffic onto the
+// mesh-intercepted port, which only carries registered mTLS identities. Dialing that
+// port in plaintext is never correct, so when it is set, missing or incomplete
+// credentials are a hard error rather than a silent downgrade to HTTP.
+func dashboardTLSRequired() bool {
+	return os.Getenv(KUBERAY_DASHBOARD_DOMAIN_SUFFIX) != ""
+}
+
+// dashboardTLSConfigured reports whether any KUBERAY_DASHBOARD_TLS_* credential is set.
+// newDashboardHTTPClient and the scheme BuildDashboardURL produces must agree on this,
+// or the client and the URL it dials will disagree.
+func dashboardTLSConfigured() bool {
+	return os.Getenv(KUBERAY_DASHBOARD_TLS_CA_CERT) != "" ||
+		os.Getenv(KUBERAY_DASHBOARD_TLS_CLIENT_CERT) != "" ||
+		os.Getenv(KUBERAY_DASHBOARD_TLS_CLIENT_KEY) != ""
+}
+
 // newDashboardHTTPClient builds an *http.Client for dashboard connections.
 //
-// TEMPORARY/TESTING GATE: TLS is only attempted when serverName (the RayCluster's
-// HeadGroupSpec.DashboardTLSServerName, qualified) is non-empty. This lets an operator
-// build with the KUBERAY_DASHBOARD_TLS_* env vars set cluster-wide be deployed onto a
-// shared cluster for testing without forcing TLS onto every other tenant's RayCluster —
-// only RayClusters that explicitly opt in via DashboardTLSServerName are affected.
-// TODO: revisit this gate once the fabric-mTLS rollout is no longer opt-in per-cluster.
+// When the KUBERAY_DASHBOARD_TLS_* environment variables are set it configures TLS
+// (one-way) or mTLS (when client cert+key are also provided). When none are set it
+// returns a plain client — but only if TLS is not required (see dashboardTLSRequired);
+// otherwise it fails, so a dropped secret mount or a typo'd variable surfaces as an
+// error instead of silently downgrading dashboard traffic to plaintext.
 //
-// When TLS is attempted, the KUBERAY_DASHBOARD_TLS_* environment variables still supply
-// the actual credentials (CA cert for verification, client cert+key for mTLS).
-//
-// serverName overrides the name used to verify the server's TLS certificate. It is
-// independent of the address actually dialed: the operator always dials the real head
-// service for the specific RayCluster generation being checked, but the certificate
-// presented there may carry a different, stable SAN.
+// serverName, when non-empty, overrides the name used to verify the server's TLS
+// certificate. It is independent of the address actually dialed: the operator always
+// dials the real head service for the specific RayCluster generation being checked, but
+// the certificate presented there may carry a different, stable SAN (see
+// HeadGroupSpec.DashboardTLSServerName). It no longer decides *whether* TLS is used.
 //
 // Each call returns a client with its own *http.Transport, so a given transport's
 // connection pool is never reused by a later dashboard check. dashboardIdleConnTimeout
 // bounds how long those orphaned keep-alive connections survive; see its declaration.
 func newDashboardHTTPClient(serverName string) (*http.Client, error) {
-	if serverName == "" {
-		return &http.Client{Timeout: 2 * time.Second}, nil
-	}
-
 	caFile := os.Getenv(KUBERAY_DASHBOARD_TLS_CA_CERT)
 	certFile := os.Getenv(KUBERAY_DASHBOARD_TLS_CLIENT_CERT)
 	keyFile := os.Getenv(KUBERAY_DASHBOARD_TLS_CLIENT_KEY)
+
+	if caFile == "" && certFile == "" && keyFile == "" {
+		if dashboardTLSRequired() {
+			return nil, fmt.Errorf(
+				"dashboard TLS is required because %s is set, but none of %s, %s, %s are configured",
+				KUBERAY_DASHBOARD_DOMAIN_SUFFIX, KUBERAY_DASHBOARD_TLS_CA_CERT,
+				KUBERAY_DASHBOARD_TLS_CLIENT_CERT, KUBERAY_DASHBOARD_TLS_CLIENT_KEY)
+		}
+		return &http.Client{Timeout: 2 * time.Second}, nil
+	}
+
+	if dashboardTLSRequired() && caFile == "" {
+		return nil, fmt.Errorf(
+			"dashboard TLS is required because %s is set, but %s is not configured, so the "+
+				"dashboard certificate cannot be verified", KUBERAY_DASHBOARD_DOMAIN_SUFFIX,
+			KUBERAY_DASHBOARD_TLS_CA_CERT)
+	}
 
 	if (certFile == "") != (keyFile == "") {
 		return nil, fmt.Errorf("%s and %s must both be set for mTLS", KUBERAY_DASHBOARD_TLS_CLIENT_CERT, KUBERAY_DASHBOARD_TLS_CLIENT_KEY)
@@ -1119,22 +1148,15 @@ func GetRayDashboardClientFunc(mgr manager.Manager, useKubernetesProxy bool) fun
 
 		// Always dial the real head service for this specific RayCluster generation. TLS
 		// verification, when needed, is handled separately via DashboardTLSServerName above —
-		// it never changes which address is dialed. useTLS mirrors the same gate as
-		// newDashboardHTTPClient so the URL scheme and client never disagree.
+		// it never changes which address is dialed. useTLS mirrors newDashboardHTTPClient's
+		// own decision so the URL scheme and the client never disagree.
 		//
-		// TEMPORARY/TESTING GATE (cont'd): KUBERAY_DASHBOARD_DOMAIN_SUFFIX/PORT route through
-		// a mesh-intercepted port that only understands registered mTLS identities. A
-		// RayCluster that hasn't opted in via DashboardTLSServerName has no such identity, so
-		// it must never be routed onto that FQDN/port — fall back to the plain, directly
-		// dialable fallbackURL (passed in as `url`) instead. Without this, setting the env
-		// vars operator-wide would still redirect every other tenant's dashboard traffic onto
-		// the mesh port and break them, even though their TLS client stays disabled.
-		useTLS := serverName != ""
-		effectiveDomainSuffix := domainSuffix
-		if !useTLS {
-			effectiveDomainSuffix = ""
-		}
-		dashURL := BuildDashboardURL(headSvcName, rayCluster.Namespace, effectiveDomainSuffix, port, url, useTLS)
+		// This is no longer gated on DashboardTLSServerName: when the operator is configured
+		// for TLS, every RayCluster's dashboard is dialed over TLS on the mesh FQDN/port,
+		// whether or not it sets the override. RayClusters whose certificate SAN already
+		// matches their generated head service name need no override at all.
+		useTLS := dashboardTLSConfigured()
+		dashURL := BuildDashboardURL(headSvcName, rayCluster.Namespace, domainSuffix, port, url, useTLS)
 
 		ctrl.Log.WithName("controllers").WithName("Dashboard").Info(
 			"Constructed Ray dashboard client",
