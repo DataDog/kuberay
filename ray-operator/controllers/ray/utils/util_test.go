@@ -1921,14 +1921,41 @@ func TestNewDashboardHTTPClient(t *testing.T) {
 			wantTLS: false,
 		},
 		{
-			name: "env vars set but server name empty — TEMPORARY gate keeps plain HTTP",
+			name: "CA cert set, server name empty — TLS, no longer gated on the override",
 			envVars: map[string]string{
 				KUBERAY_DASHBOARD_TLS_CA_CERT: caFile,
 			},
-			wantTLS: false,
+			wantTLS: true,
 		},
 		{
-			name:       "server name set but no env vars — TLS with system CA pool, no client cert",
+			name:       "server name set but no env vars — plain HTTP, TLS not required",
+			serverName: "my-rayservice-head-svc",
+			wantTLS:    false,
+		},
+		{
+			name: "domain suffix set with no credentials — fails closed instead of plain HTTP",
+			envVars: map[string]string{
+				KUBERAY_DASHBOARD_DOMAIN_SUFFIX: "svc.example.com",
+			},
+			serverName: "my-rayservice-head-svc",
+			wantErr:    "dashboard TLS is required",
+		},
+		{
+			name: "domain suffix set with client cert+key but no CA — fails closed, cert unverifiable",
+			envVars: map[string]string{
+				KUBERAY_DASHBOARD_DOMAIN_SUFFIX:   "svc.example.com",
+				KUBERAY_DASHBOARD_TLS_CLIENT_CERT: caFile,
+				KUBERAY_DASHBOARD_TLS_CLIENT_KEY:  caFile,
+			},
+			serverName: "my-rayservice-head-svc",
+			wantErr:    KUBERAY_DASHBOARD_TLS_CA_CERT,
+		},
+		{
+			name: "domain suffix set with CA cert — TLS, requirement satisfied",
+			envVars: map[string]string{
+				KUBERAY_DASHBOARD_DOMAIN_SUFFIX: "svc.example.com",
+				KUBERAY_DASHBOARD_TLS_CA_CERT:   caFile,
+			},
 			serverName: "my-rayservice-head-svc",
 			wantTLS:    true,
 		},
